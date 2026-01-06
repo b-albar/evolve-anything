@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolve-anything"
+version = "0.0.1"
+description = "Evolve Anything"
+authors = [
+    {name = "Boris Albar", email = "boris.albar@protonmail.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "openai",
+    "numpy",
+    "pandas",
+    "requests",
+    "pydantic",
+    "backoff",
+    "python-dotenv",
+    "python-Levenshtein",
+    "radon",
+    "unidiff",
+    "dill",
+    "matplotlib",
+    "networkx",
+    "seaborn",
+    "moviepy",
+    "adjustText",
+    "markdown",
+    "aiofiles",
+    "scikit-learn",
+    "microsandbox",
+    "streamlit",
+    "plotly",
+    "beautifulsoup4",
+]
+
+[project.scripts]
+evolve-anything-visualize = "evolve_anything.webui.visualization:main"
+evolve-anything-streamlit = "evolve_anything.webui.streamlit_app:cli_main"
+
+[tool.setuptools.packages.find]
+include = ["evolve_anything", "evolve_anything.*"]
+
+[tool.setuptools.package-data]
+"*" = ["*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=6.0",
+    "black",
+    "isort",
+    "flake8",
+]
