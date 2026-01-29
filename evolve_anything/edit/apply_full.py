@@ -39,6 +39,7 @@ def apply_full_patch(
         code_start,
         DEFAULT_FORMAT.code_end_tag,
         False,
+        fallback=True,
     )
 
     # Handle the case where extract_between returns None, dict, or "none"

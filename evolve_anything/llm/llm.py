@@ -358,7 +358,8 @@ def extract_between(
 
     # Extracts any block between ``` and ```
     if fallback:
-        match = re.search("```\\s*(.*?)\\s*```", content, re.DOTALL)
+        # Matches ``` optionally followed by language identifier, then content, then ```
+        match = re.search(r"```(?:\w+)?\s*(.*?)\s*```", content, re.DOTALL)
         if match:
             matched_str = match.group(1).strip()
             if return_dict:

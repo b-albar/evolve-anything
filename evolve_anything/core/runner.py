@@ -11,6 +11,7 @@ from typing import List, Optional, Union, cast
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
+import subprocess
 from evolve_anything.launch import JobScheduler, JobConfig, JobHandle
 from evolve_anything.database import ProgramDatabase, DatabaseConfig, Program
 from evolve_anything.llm import (
@@ -124,6 +125,7 @@ class EvolutionConfig:
             "paperswithcode.com",
         ]
     )
+    validation_command: Optional[str] = None
 
 
 @dataclass
@@ -173,18 +175,25 @@ class EvolutionRunner:
 
             # Set up logging with both console and file handlers
             logging.basicConfig(
-                level=logging.INFO,
+                level=logging.DEBUG,
                 format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
                 handlers=[
                     RichHandler(
-                        show_time=False, show_level=False, show_path=False
+                        show_time=False,
+                        show_level=False,
+                        show_path=False,
+                        level=logging.INFO,
                     ),  # Console output (clean)
                     logging.FileHandler(
                         log_filename, mode="a", encoding="utf-8"
                     ),  # File output (detailed)
                 ],
             )
+
+            # Silence noisy libraries at DEBUG level
+            for lib in ["httpx", "httpcore", "openai", "urllib3"]:
+                logging.getLogger(lib).setLevel(logging.WARNING)
 
             # Also log the initial setup information
             logger.info(LOG_SEPARATOR)
@@ -1137,6 +1146,7 @@ class EvolutionRunner:
         patch_txt_attempt = None
         patch_path = None
         diff_summary = {}
+        validation_attempts = 0
 
         for patch_attempt in range(max_patch_attempts):
             response = self.llm.query(
@@ -1199,6 +1209,45 @@ class EvolutionRunner:
             )
 
             if error_attempt is None and num_applied_attempt > 0:
+                # Run validation command if configured
+                if self.evo_config.validation_command:
+                    try:
+                        validation_attempts += 1
+                        cmd = self.evo_config.validation_command
+                        # Substitute placeholders
+                        if "{filename}" in cmd and output_path_attempt:
+                            cmd = cmd.format(
+                                filename=str(output_path_attempt),
+                                dir=str(Path(output_path_attempt).parent),
+                            )
+
+                        if self.verbose:
+                            logger.info(
+                                f"  Running validation (attempt {validation_attempts}): {cmd}"
+                            )
+
+                        # Run the command
+                        proc = subprocess.run(
+                            cmd, shell=True, capture_output=True, text=True
+                        )
+
+                        if proc.returncode != 0:
+                            error_attempt = (
+                                f"Validation failed (exit code {proc.returncode}):\n"
+                                f"stdout:\n{proc.stdout}\n"
+                                f"stderr:\n{proc.stderr}\n"
+                            )
+                            if self.verbose:
+                                logger.info(
+                                    f"  Validation failed (exit code {proc.returncode})"
+                                )
+                                logger.debug(f"  Validation details: {error_attempt}")
+                    except Exception as e:
+                        error_attempt = f"Validation execution error: {e}"
+                        if self.verbose:
+                            logger.error(f"  Validation execution error: {e}")
+
+            if error_attempt is None and num_applied_attempt > 0:
                 if patch_path:  # Ensure patch_path is not None
                     diff_summary = summarize_diff(
                         str(patch_path)
@@ -1209,7 +1258,6 @@ class EvolutionRunner:
                         f"Output: {output_path_attempt}, "
                         f"Patches Applied: {num_applied_attempt}."
                     )
-
                 code_diff = patch_txt_attempt
                 break  # Break from patch attempts
             else:
@@ -1223,11 +1271,26 @@ class EvolutionRunner:
                     + "\n\n Try again."
                 )
                 if self.verbose:
+                    # Create a condensed error message for the console log
+                    log_error_str = error_str
+                    if "Validation failed" in error_str and "\n" in error_str:
+                        # Keep it short for validation errors
+                        log_error_str = (
+                            error_str.split("\n")[0] + " (see debug log for output)"
+                        )
+                    elif "SEARCH text not found" in error_str:
+                        log_error_str = "Patch application failed: Search pattern not found in file (see debug log for details)"
+                    elif "Attempted to edit outside" in error_str:
+                        log_error_str = "Patch application failed: Edit outside mutable region (see debug log for details)"
+                    elif len(log_error_str) > 200:
+                        log_error_str = log_error_str[:200] + "..."
+
                     logger.info(
                         f"  PATCH ATTEMPT {patch_attempt + 1}/{max_patch_attempts} FAILURE. "
-                        f"Error: '{error_str}', "
+                        f"Error: '{log_error_str}', "
                         f"Patches Applied: {num_applied_attempt}."
                     )
+                    logger.debug(f"  Full failure error: {error_str}")
                 msg_history = response.new_msg_history
                 code_diff = None
                 if patch_attempt == max_patch_attempts - 1:  # Last attempt failed
@@ -1253,6 +1316,7 @@ class EvolutionRunner:
             llm_kwargs=llm_kwargs,
             llm_result=response.to_dict() if response else None,
             diff_summary=diff_summary if isinstance(diff_summary, dict) else {},
+            validation_attempts=validation_attempts,
         )
         if self.verbose and num_applied_attempt > 0:
             meta_edit_data.print_table(

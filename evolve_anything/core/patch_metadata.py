@@ -30,6 +30,7 @@ class PatchMetadata:
     llm_kwargs: dict = field(default_factory=dict)
     llm_result: Optional[dict] = None
     diff_summary: dict = field(default_factory=dict)
+    validation_attempts: int = 0
     # Optional fields added after patch generation
     meta_recommendations: Optional[str] = None
     meta_summary: Optional[str] = None
@@ -147,6 +148,9 @@ class PatchMetadata:
                 if len(error_str) > 100
                 else f"[red]{error_str}[/red]",
             )
+
+        if self.validation_attempts > 0:
+            table.add_row("validation_attempts", str(self.validation_attempts))
 
         # Add llm_kwargs fields
         for key, value in self.llm_kwargs.items():
