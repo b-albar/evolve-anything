@@ -2,9 +2,11 @@
 Query module.
 
 Provides functions for querying LLMs and sampling model kwargs.
-Uses the OpenRouter provider for all model queries.
+Uses the OpenRouter provider for all model queries, with optional
+support for Claude Code wrapper via model prefix routing.
 """
 
+import os
 from typing import List, Union, Optional, Dict, Type, Any
 import random
 from pydantic import BaseModel
@@ -18,16 +20,53 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-# Global provider instance (lazy initialized)
-_provider: OpenRouterProvider = None
+# Global provider instances (lazy initialized)
+_default_provider: OpenRouterProvider = None
+_claude_code_provider: OpenRouterProvider = None
+
+# Claude Code wrapper configuration
+CLAUDE_CODE_PREFIX = "claude-code/"
+CLAUDE_CODE_BASE_URL = os.getenv("CLAUDE_CODE_BASE_URL", "http://localhost:7999/v1")
 
 
-def _get_provider() -> OpenRouterProvider:
-    """Get or create the global provider instance."""
-    global _provider
-    if _provider is None:
-        _provider = OpenRouterProvider()
-    return _provider
+def _get_provider(model_name: Optional[str] = None) -> OpenRouterProvider:
+    """Get or create the appropriate provider instance based on model prefix.
+
+    Args:
+        model_name: The model name to determine which provider to use.
+                   Models prefixed with 'claude-code/' use the Claude Code wrapper.
+
+    Returns:
+        The appropriate OpenRouterProvider instance.
+    """
+    global _default_provider, _claude_code_provider
+
+    # Check if this is a Claude Code model
+    if model_name and model_name.startswith(CLAUDE_CODE_PREFIX):
+        if _claude_code_provider is None:
+            # Use a dummy API key for Claude Code wrapper (it uses CLI auth)
+            api_key = os.getenv("CLAUDE_CODE_API_KEY", "claude-code")
+            _claude_code_provider = OpenRouterProvider(
+                api_key=api_key,
+                base_url=CLAUDE_CODE_BASE_URL,
+            )
+        return _claude_code_provider
+
+    # Default provider for OpenRouter
+    if _default_provider is None:
+        _default_provider = OpenRouterProvider()
+    return _default_provider
+
+
+def _normalize_model_name(model_name: str) -> str:
+    """Strip the claude-code/ prefix for the actual API call.
+
+    The Claude Code wrapper accepts any model name, so we strip the prefix
+    and pass the rest (e.g., 'claude-code/opus' -> 'opus').
+    """
+    if model_name.startswith(CLAUDE_CODE_PREFIX):
+        return model_name[len(CLAUDE_CODE_PREFIX):]
+    return model_name
 
 
 def sample_model_kwargs(
@@ -105,10 +144,12 @@ def query(
     **kwargs,
 ) -> QueryResult:
     """
-    Query the LLM using the OpenRouter provider.
+    Query the LLM using the appropriate provider.
 
     Args:
-        model_name: The model to query (e.g., "openai/gpt-4o", "anthropic/claude-3-5-sonnet")
+        model_name: The model to query. Supports:
+            - OpenRouter models: "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
+            - Claude Code wrapper: "claude-code/opus", "claude-code/sonnet"
         msg: The user message
         system_msg: The system prompt
         msg_history: Previous conversation history
@@ -119,10 +160,11 @@ def query(
     Returns:
         QueryResult containing the response and metadata
     """
-    provider = _get_provider()
+    provider = _get_provider(model_name)
+    api_model_name = _normalize_model_name(model_name)
 
     result = provider.query(
-        model=model_name,
+        model=api_model_name,
         msg=msg,
         system_msg=system_msg,
         msg_history=msg_history,
@@ -130,6 +172,9 @@ def query(
         model_posteriors=model_posteriors,
         **kwargs,
     )
+
+    # Preserve original model name in result for tracking
+    result.model_name = model_name
 
     return result
 
@@ -147,7 +192,9 @@ async def query_async(
     Query the LLM asynchronously.
 
     Args:
-        model_name: The model to query
+        model_name: The model to query. Supports:
+            - OpenRouter models: "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
+            - Claude Code wrapper: "claude-code/opus", "claude-code/sonnet"
         msg: The user message
         system_msg: The system prompt
         msg_history: Previous conversation history
@@ -158,10 +205,11 @@ async def query_async(
     Returns:
         QueryResult containing the response and metadata
     """
-    provider = _get_provider()
+    provider = _get_provider(model_name)
+    api_model_name = _normalize_model_name(model_name)
 
     result = await provider.query_async(
-        model=model_name,
+        model=api_model_name,
         msg=msg,
         system_msg=system_msg,
         msg_history=msg_history,
@@ -169,5 +217,8 @@ async def query_async(
         model_posteriors=model_posteriors,
         **kwargs,
     )
+
+    # Preserve original model name in result for tracking
+    result.model_name = model_name
 
     return result
