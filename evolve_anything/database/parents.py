@@ -1,4 +1,3 @@
-import json
 import logging
 import sqlite3
 from abc import ABC, abstractmethod
@@ -79,6 +78,7 @@ class ParentSamplingStrategy(ABC):
         get_program_func: Callable[[str], Any],
         best_program_id: Optional[str] = None,
         island_idx: Optional[int] = None,
+        program_from_row_func: Optional[Callable] = None,
     ):
         self.cursor = cursor
         self.conn = conn
@@ -86,6 +86,7 @@ class ParentSamplingStrategy(ABC):
         self.get_program = get_program_func
         self.best_program_id = best_program_id
         self.island_idx = island_idx
+        self.program_from_row = program_from_row_func
 
     @abstractmethod
     def sample_parent(self) -> Any:
@@ -110,13 +111,58 @@ class ParentSamplingStrategy(ABC):
         row = self.cursor.fetchone()
         return row["island_idx"] if row else None
 
+    def _programs_from_rows(self, rows) -> list:
+        """Convert DB rows to Program objects using program_from_row if available,
+        otherwise fall back to get_program (N+1 queries)."""
+        if self.program_from_row:
+            return [p for row in rows if (p := self.program_from_row(row))]
+        return [p for row in rows if (p := self.get_program(row["id"]))]
+
+    def _fallback_to_best(self, island_idx: Optional[int] = None) -> Any:
+        """Try best program, then random correct program. Returns Program or None."""
+        if self.best_program_id:
+            best_prog = self.get_program(self.best_program_id)
+            if (
+                best_prog
+                and best_prog.correct
+                and (island_idx is None or best_prog.island_idx == island_idx)
+            ):
+                logger.info(
+                    f"Fallback: Using best program {self.best_program_id}"
+                )
+                return best_prog
+
+        return self._random_correct_program(island_idx)
+
+    def _random_correct_program(self, island_idx: Optional[int] = None) -> Any:
+        """Get a random correct program, optionally constrained to an island."""
+        if island_idx is not None:
+            self.cursor.execute(
+                """SELECT id FROM programs
+                   WHERE correct = 1 AND island_idx = ?
+                   ORDER BY RANDOM() LIMIT 1""",
+                (island_idx,),
+            )
+        else:
+            self.cursor.execute(
+                """SELECT id FROM programs WHERE correct = 1
+                   ORDER BY RANDOM() LIMIT 1"""
+            )
+        row = self.cursor.fetchone()
+        if row:
+            prog = self.get_program(row["id"])
+            if prog:
+                logger.info(f"Fallback: Random correct program {row['id']}")
+                return prog
+        return None
+
 
 class PowerLawSamplingStrategy(ParentSamplingStrategy):
     """Power law sampling strategy for parent selection."""
 
     def sample_parent(self) -> Any:
         if not hasattr(self.config, "exploitation_ratio"):
-            raise ConnectionError("DB/config issue for parent sampling.")
+            raise ValueError("Config missing exploitation_ratio for parent sampling.")
 
         pid: Optional[str] = None
         # Try elite archive for exploitation (archive only contains correct programs)
@@ -124,24 +170,18 @@ class PowerLawSamplingStrategy(ParentSamplingStrategy):
             if np.random.random() < self.config.exploitation_ratio:
                 if self.island_idx is not None:
                     self.cursor.execute(
-                        """SELECT a.program_id FROM archive a
-                           JOIN programs p ON a.program_id = p.id
+                        """SELECT p.* FROM programs p
+                           JOIN archive a ON a.program_id = p.id
                            WHERE p.island_idx = ?""",
                         (self.island_idx,),
                     )
                 else:
-                    self.cursor.execute("SELECT program_id FROM archive")
+                    self.cursor.execute(
+                        "SELECT p.* FROM programs p JOIN archive a ON a.program_id = p.id"
+                    )
                 archived_rows = self.cursor.fetchall()
                 if archived_rows:
-                    archived_program_ids = [row["program_id"] for row in archived_rows]
-
-                    # Fetch Program objects. This could be slow if archive is huge.
-                    # Consider optimizing if performance becomes an issue.
-                    archived_programs = []
-                    for prog_id in archived_program_ids:
-                        prog = self.get_program(prog_id)
-                        if prog:
-                            archived_programs.append(prog)
+                    archived_programs = self._programs_from_rows(archived_rows)
 
                     if archived_programs:
                         # Sort by combined_score descending (best first) unless minimizing
@@ -171,25 +211,20 @@ class PowerLawSamplingStrategy(ParentSamplingStrategy):
         if not pid:
             if self.island_idx is not None:
                 self.cursor.execute(
-                    f"""SELECT p.id FROM programs p
+                    f"""SELECT p.* FROM programs p
                        WHERE p.correct = 1 AND p.island_idx = ?
                        ORDER BY p.combined_score {self.sort_order}""",
                     (self.island_idx,),
                 )
             else:
                 self.cursor.execute(
-                    f"""SELECT p.id FROM programs p
+                    f"""SELECT p.* FROM programs p
                        WHERE p.correct = 1
                        ORDER BY p.combined_score {self.sort_order}"""
                 )
             correct_rows = self.cursor.fetchall()
             if correct_rows:
-                correct_program_ids = [row["id"] for row in correct_rows]
-                correct_programs = []
-                for prog_id in correct_program_ids:
-                    prog = self.get_program(prog_id)
-                    if prog:
-                        correct_programs.append(prog)
+                correct_programs = self._programs_from_rows(correct_rows)
 
                 if correct_programs:
                     # Use exploration_alpha for more diverse parent selection
@@ -238,51 +273,8 @@ class PowerLawSamplingStrategy(ParentSamplingStrategy):
 
         # Fallbacks (only correct programs)
         if not pid:
-            # Try best program (which should be correct)
-            if self.best_program_id:
-                best_prog = self.get_program(self.best_program_id)
-                if (
-                    best_prog
-                    and best_prog.correct
-                    and (
-                        self.island_idx is None
-                        or best_prog.island_idx == self.island_idx
-                    )
-                ):
-                    pid = self.best_program_id
-                    score = best_prog.combined_score or 0.0
-                    logger.info(
-                        f"Exploitation: Return best program: {pid} "
-                        f"(Gen: {best_prog.generation}, Score: {score:.4f})"
-                    )
-
-        # Final fallback: any correct program
-        if not pid:
-            if self.island_idx is not None:
-                self.cursor.execute(
-                    """SELECT id FROM programs
-                       WHERE correct = 1 AND island_idx = ?
-                       ORDER BY RANDOM() LIMIT 1""",
-                    (self.island_idx,),
-                )
-            else:
-                self.cursor.execute(
-                    """SELECT id FROM programs WHERE correct = 1
-                       ORDER BY RANDOM() LIMIT 1"""
-                )
-            row = self.cursor.fetchone()
-            if row:
-                pid = row["id"]
-                prog = self.get_program(pid)
-                if prog:
-                    logger.info(f"Fallback: Random correct program: {pid}")
-
-        if not pid:
-            logger.warning(
-                "No parent found, database may be empty or no correct "
-                "programs in specified island."
-            )
-            return None
+            fallback = self._fallback_to_best(self.island_idx)
+            return fallback
 
         return self.get_program(pid)
 
@@ -315,102 +307,22 @@ class WeightedSamplingStrategy(ParentSamplingStrategy):
 
         if not archive_rows:
             logger.warning("No archived programs found for weighted sampling.")
-            if self.best_program_id:
-                best_prog = self.get_program(self.best_program_id)
-                if best_prog and (
-                    self.island_idx is None or best_prog.island_idx == self.island_idx
-                ):
-                    return best_prog
-
-            # Fallback to random correct program in island
-            if self.island_idx is not None:
-                self.cursor.execute(
-                    """SELECT id FROM programs
-                       WHERE correct = 1 AND island_idx = ?
-                       ORDER BY RANDOM() LIMIT 1""",
-                    (self.island_idx,),
-                )
-            else:
-                self.cursor.execute(
-                    """SELECT id FROM programs WHERE correct = 1
-                       ORDER BY RANDOM() LIMIT 1"""
-                )
-            row = self.cursor.fetchone()
-            return self.get_program(row["id"]) if row else None
+            return self._fallback_to_best(self.island_idx)
 
         eligible_programs = []
         for row in archive_rows:
             p_dict = dict(row)
-
-            # Parse JSON fields
-            p_dict["public_metrics"] = (
-                json.loads(p_dict["public_metrics"])
-                if p_dict.get("public_metrics")
-                else {}
-            )
-            p_dict["private_metrics"] = (
-                json.loads(p_dict["private_metrics"])
-                if p_dict.get("private_metrics")
-                else {}
-            )
-            p_dict["metadata"] = (
-                json.loads(p_dict["metadata"]) if p_dict.get("metadata") else {}
-            )
-            p_dict["archive_inspiration_ids"] = (
-                json.loads(p_dict["archive_inspiration_ids"])
-                if p_dict.get("archive_inspiration_ids")
-                else []
-            )
-            p_dict["top_k_inspiration_ids"] = (
-                json.loads(p_dict["top_k_inspiration_ids"])
-                if p_dict.get("top_k_inspiration_ids")
-                else []
-            )
-            p_dict["embedding"] = (
-                json.loads(p_dict["embedding"]) if p_dict.get("embedding") else []
-            )
-            p_dict["embedding_pca_2d"] = (
-                json.loads(p_dict["embedding_pca_2d"])
-                if p_dict.get("embedding_pca_2d")
-                else []
-            )
-            p_dict["embedding_pca_3d"] = (
-                json.loads(p_dict["embedding_pca_3d"])
-                if p_dict.get("embedding_pca_3d")
-                else []
-            )
-            p_dict["migration_history"] = (
-                json.loads(p_dict["migration_history"])
-                if p_dict.get("migration_history")
-                else []
-            )
-
-            # Create a simple dataclass-like object from the dict to avoid circular imports
-            class SimpleProgram:
-                def __init__(self, data):
-                    for key, value in data.items():
-                        setattr(self, key, value)
-                    # Ensure required attributes exist
-                    if not hasattr(self, "combined_score"):
-                        self.combined_score = 0.0
-                    if not hasattr(self, "children_count"):
-                        self.children_count = 0
-                    if not hasattr(self, "correct"):
-                        self.correct = False
-                    if not hasattr(self, "id"):
-                        self.id = None
-
-            eligible_programs.append(SimpleProgram(p_dict))
+            # Only need id, combined_score, children_count, generation, island_idx
+            # for weighted sampling — skip full deserialization
+            eligible_programs.append(p_dict)
 
         # Calculate baseline performance (alpha_0) as the median
-        scores = [p.combined_score or 0.0 for p in eligible_programs]
+        scores = [p.get("combined_score") or 0.0 for p in eligible_programs]
         alpha_0 = np.median(scores) if scores else 0.0
 
-        # Calculate scale-robust normalization factor
-        # Use median absolute deviation (MAD) for robust scaling
+        # Calculate scale-robust normalization factor (MAD)
         score_deviations = [abs(score - alpha_0) for score in scores]
         mad = np.median(score_deviations) if score_deviations else 1.0
-        # Avoid division by zero - use a small epsilon if MAD is zero
         scale_factor = max(mad, 1e-6)
 
         # Calculate weights for each program
@@ -418,23 +330,15 @@ class WeightedSamplingStrategy(ParentSamplingStrategy):
         lambda_ = self.config.parent_selection_lambda
 
         for i, p in enumerate(eligible_programs):
-            # performance (alpha_i) from combined_score
-            alpha_i = p.combined_score or 0.0
-            # children count (n_i)
-            n_i = p.children_count
+            alpha_i = p.get("combined_score") or 0.0
+            n_i = p.get("children_count") or 0
 
-            # sigmoid-scaled performance (s_i) - scale-robust and numerically stable
-            # Normalize the difference by the scale factor to make it robust to problem scale
             diff = alpha_i - alpha_0
             if self.minimize:
-                diff = -diff  # Lower score is better, so flip the difference
+                diff = -diff
             normalized_diff = diff / scale_factor
             s_i = stable_sigmoid(lambda_ * normalized_diff)
-
-            # novelty bonus (h_i)
             h_i = 1 / (1 + n_i)
-
-            # unnormalized weight (w_i)
             w_i = s_i * h_i
             weights.append(w_i)
             logger.debug(
@@ -447,10 +351,8 @@ class WeightedSamplingStrategy(ParentSamplingStrategy):
         if weights_sum > 0:
             probabilities = [w / weights_sum for w in weights]
         else:
-            # Fallback to uniform distribution if all weights are zero
             logger.warning(
-                "All parent selection weights are zero, falling back to "
-                "uniform sampling."
+                "All parent selection weights are zero, falling back to uniform sampling."
             )
             num_eligible = len(eligible_programs)
             probabilities = [1.0 / num_eligible] * num_eligible
@@ -458,20 +360,21 @@ class WeightedSamplingStrategy(ParentSamplingStrategy):
             f"Island {self.island_idx} => Probabilities: {np.array(probabilities).tolist()}"
         )
         logger.info(
-            f"Island {self.island_idx} => Scores: {[p.combined_score for p in eligible_programs]}"
+            f"Island {self.island_idx} => Scores: {scores}"
         )
         # Sample one parent based on probabilities
-        selected_parent = np.random.choice(eligible_programs, p=probabilities)
+        selected_idx = np.random.choice(len(eligible_programs), p=probabilities)
+        selected = eligible_programs[selected_idx]
 
         logger.info(
-            f"Sampled parent {selected_parent.id} "
-            f"(Gen: {selected_parent.generation}, "
-            f"Score: {selected_parent.combined_score or 0.0:.4f}, "
-            f"Children: {selected_parent.children_count}, "
-            f"Island: {selected_parent.island_idx})"
+            f"Sampled parent {selected['id']} "
+            f"(Gen: {selected.get('generation')}, "
+            f"Score: {selected.get('combined_score', 0.0):.4f}, "
+            f"Children: {selected.get('children_count', 0)}, "
+            f"Island: {selected.get('island_idx')})"
         )
 
-        return self.get_program(selected_parent.id)
+        return self.get_program(selected["id"])
 
 
 class BeamSearchSamplingStrategy(ParentSamplingStrategy):
@@ -489,9 +392,11 @@ class BeamSearchSamplingStrategy(ParentSamplingStrategy):
         last_iteration: int = 0,
         update_metadata_func: Optional[Callable[[str, Optional[str]], None]] = None,
         get_best_program_func: Optional[Callable[[], Any]] = None,
+        program_from_row_func: Optional[Callable] = None,
     ):
         super().__init__(
-            cursor, conn, config, get_program_func, best_program_id, island_idx
+            cursor, conn, config, get_program_func, best_program_id, island_idx,
+            program_from_row_func=program_from_row_func,
         )
         self.beam_search_parent_id = beam_search_parent_id
         self.last_iteration = last_iteration
@@ -552,16 +457,8 @@ class BeamSearchSamplingStrategy(ParentSamplingStrategy):
                             )
                             return best_program
 
-        # Fallback to best program
-        if self.best_program_id:
-            return self.get_program(self.best_program_id)
-
-        # Final fallback
-        self.cursor.execute(
-            "SELECT id FROM programs WHERE correct = 1 ORDER BY RANDOM() LIMIT 1"
-        )
-        row = self.cursor.fetchone()
-        return self.get_program(row["id"]) if row else None
+        # Fallback
+        return self._fallback_to_best(self.island_idx)
 
 
 class BestOfNSamplingStrategy(ParentSamplingStrategy):
@@ -600,35 +497,7 @@ class BestOfNSamplingStrategy(ParentSamplingStrategy):
         logger.warning(
             "No generation 0 program found, falling back to any correct program"
         )
-        if self.island_idx is not None:
-            self.cursor.execute(
-                """SELECT id FROM programs
-                   WHERE correct = 1 AND island_idx = ?
-                   ORDER BY generation ASC, id ASC LIMIT 1""",
-                (self.island_idx,),
-            )
-        else:
-            self.cursor.execute(
-                """SELECT id FROM programs
-                   WHERE correct = 1
-                   ORDER BY generation ASC, id ASC LIMIT 1"""
-            )
-
-        row = self.cursor.fetchone()
-        if row:
-            pid = row["id"]
-            prog = self.get_program(pid)
-            if prog:
-                logger.info(
-                    f"Best-of-N: Fallback to earliest correct program {pid} "
-                    f"(Gen: {prog.generation}, "
-                    f"Score: {prog.combined_score or 0.0:.4f}, "
-                    f"Island: {prog.island_idx})"
-                )
-                return prog
-
-        logger.warning("No suitable parent found for best-of-n strategy")
-        return None
+        return self._random_correct_program(self.island_idx)
 
 
 class CombinedParentSelector:
@@ -646,6 +515,7 @@ class CombinedParentSelector:
         update_metadata_func: Optional[Callable[[str, Optional[str]], None]] = None,
         get_best_program_func: Optional[Callable[[], Any]] = None,
         map_elites_archive: Optional[MapElitesArchive] = None,
+        program_from_row_func: Optional[Callable] = None,
     ):
         self.cursor = cursor
         self.conn = conn
@@ -657,10 +527,13 @@ class CombinedParentSelector:
         self.update_metadata = update_metadata_func
         self.get_best_program_func = get_best_program_func
         self.map_elites_archive = map_elites_archive
+        self.program_from_row = program_from_row_func
 
     def sample_parent(self, island_idx: Optional[int] = None) -> Any:
         """Sample a parent using the configured sampling strategy."""
         strategy_name = self.config.parent_selection_strategy
+
+        _from_row = self.program_from_row
 
         if strategy_name == "power_law":
             strategy = PowerLawSamplingStrategy(
@@ -670,6 +543,7 @@ class CombinedParentSelector:
                 self.get_program,
                 self.best_program_id,
                 island_idx,
+                program_from_row_func=_from_row,
             )
         elif strategy_name == "weighted":
             strategy = WeightedSamplingStrategy(
@@ -679,6 +553,7 @@ class CombinedParentSelector:
                 self.get_program,
                 self.best_program_id,
                 island_idx,
+                program_from_row_func=_from_row,
             )
         elif strategy_name == "beam_search":
             strategy = BeamSearchSamplingStrategy(
@@ -692,6 +567,7 @@ class CombinedParentSelector:
                 last_iteration=self.last_iteration,
                 update_metadata_func=self.update_metadata,
                 get_best_program_func=self.get_best_program_func,
+                program_from_row_func=_from_row,
             )
         elif strategy_name == "best_of_n":
             strategy = BestOfNSamplingStrategy(
@@ -701,6 +577,7 @@ class CombinedParentSelector:
                 self.get_program,
                 self.best_program_id,
                 island_idx,
+                program_from_row_func=_from_row,
             )
         elif strategy_name == "map_elites":
             if not self.map_elites_archive:
@@ -714,6 +591,7 @@ class CombinedParentSelector:
                     self.get_program,
                     self.best_program_id,
                     island_idx,
+                    program_from_row_func=_from_row,
                 )
             else:
                 # MapElitesParentSelector needs to look like ParentSamplingStrategy
@@ -738,36 +616,11 @@ class CombinedParentSelector:
 
         parent = strategy.sample_parent()
 
-        # Fallback to best program if sampling failed
         if not parent:
-            # Try best program first
-            if self.best_program_id:
-                parent = self.get_program(self.best_program_id)
-                if (
-                    parent
-                    and parent.correct
-                    and (island_idx is None or parent.island_idx == island_idx)
-                ):
-                    return parent
+            # Use the strategy's fallback helpers
+            parent = strategy._fallback_to_best(island_idx)
 
-            # Final fallback: random correct program
-            if island_idx is not None:
-                self.cursor.execute(
-                    """SELECT id FROM programs
-                       WHERE correct = 1 AND island_idx = ?
-                       ORDER BY RANDOM() LIMIT 1""",
-                    (island_idx,),
-                )
-            else:
-                self.cursor.execute(
-                    """SELECT id FROM programs
-                       ORDER BY RANDOM() LIMIT 1"""
-                )
-            row = self.cursor.fetchone()
-            if row:
-                parent = self.get_program(row["id"])
-
-            if not parent:
-                raise ValueError("Database empty or parent sampling failed.")
+        if not parent:
+            raise ValueError("Database empty or parent sampling failed.")
 
         return parent

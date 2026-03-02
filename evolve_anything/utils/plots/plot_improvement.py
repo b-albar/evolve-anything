@@ -84,9 +84,9 @@ def plot_improvement(
     labels = [h.get_label() for h in handles]
 
     if "api_costs" in df_filtered.columns:
-        cumulative_api_cost = df["api_costs"].cumsum().bfill()
+        cumulative_api_cost = df_filtered["api_costs"].cumsum().bfill()
         line2 = ax2.plot(
-            df["generation"],
+            df_filtered["generation"],
             cumulative_api_cost,
             linewidth=2,
             color="orange",

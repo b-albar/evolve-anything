@@ -658,7 +658,7 @@ class FixedSampler(BanditBase):
                 display_name = str(name)
             table.add_row(
                 display_name,
-                f"{self._baseline[i]:.4f}",
+                f"{self._baseline:.4f}",
                 f"{post[i]:.4f}",
             )
 

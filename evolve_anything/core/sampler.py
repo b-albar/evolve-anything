@@ -5,6 +5,7 @@ from evolve_anything.prompts import (
     construct_eval_history_msg,
     perf_str,
     format_text_feedback_section,
+    format_program_files,
     BASE_SYSTEM_MSG,
     DIFF_SYS_FORMAT,
     DIFF_ITER_MSG,
@@ -71,6 +72,7 @@ class PromptSampler:
         archive_inspirations: List[Program],
         top_k_inspirations: List[Program],
         meta_recommendations: Optional[str] = None,
+        learning_log: str = "",
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
@@ -122,6 +124,10 @@ class PromptSampler:
                 include_text_feedback=self.use_text_feedback,
             )
 
+        # Add learning log (ancestor mutation history)
+        if learning_log:
+            eval_history_msg += "\n" + learning_log
+
         # Format text feedback section for current program
         text_feedback_section = ""
         if self.use_text_feedback:
@@ -129,10 +135,30 @@ class PromptSampler:
                 parent.text_feedback
             )
 
+        # Format code display (multi-file or single-file)
+        is_multifile = len(parent.files) > 1
+        if is_multifile:
+            code_display = format_program_files(parent.files, self.language)
+        else:
+            code_display = f"```{self.language}\n{parent.code}\n```"
+
+        # Add multi-file instructions to system message
+        if is_multifile and patch_type == "diff":
+            sys_msg += (
+                "\n* For multi-file programs, prefix each SEARCH/REPLACE "
+                "group with `FILE: <relative_path>` on its own line to "
+                "indicate which file to modify."
+            )
+        elif is_multifile and patch_type in ["full", "cross"]:
+            sys_msg += (
+                "\n* For multi-file programs, output each file with a "
+                "`FILE: <relative_path>` header followed by a fenced code "
+                "block containing the complete file content."
+            )
+
         if patch_type == "diff":
             iter_msg = DIFF_ITER_MSG.format(
-                language=self.language,
-                code_content=parent.code,
+                code_display=code_display,
                 performance_metrics=perf_str(
                     parent.combined_score, parent.public_metrics, self.minimize
                 ),
@@ -141,8 +167,7 @@ class PromptSampler:
             )
         elif patch_type == "full":
             iter_msg = FULL_ITER_MSG.format(
-                language=self.language,
-                code_content=parent.code,
+                code_display=code_display,
                 performance_metrics=perf_str(
                     parent.combined_score, parent.public_metrics, self.minimize
                 ),
@@ -150,8 +175,7 @@ class PromptSampler:
             )
         elif patch_type == "cross":
             iter_msg = CROSS_ITER_MSG.format(
-                language=self.language,
-                code_content=parent.code,
+                code_display=code_display,
                 performance_metrics=perf_str(
                     parent.combined_score, parent.public_metrics, self.minimize
                 ),

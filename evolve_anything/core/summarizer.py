@@ -32,6 +32,7 @@ class MetaSummarizer:
         web_research_llm_client: Optional[LLMClient] = None,
         web_research_interval: int = 1,
         web_research_allow_list: Optional[List[str]] = None,
+        max_history_size: int = 10,
     ):
         self.meta_llm_client = meta_llm_client
         self.web_research_llm_client = (
@@ -45,6 +46,7 @@ class MetaSummarizer:
         self.web_research_interval = web_research_interval
         self.web_research_allow_list = web_research_allow_list
         self.meta_update_count = 0
+        self.max_history_size = max_history_size
 
         # Meta state
         self.meta_summary = None
@@ -204,9 +206,11 @@ class MetaSummarizer:
             self.meta_scratch_pad = global_insights
             self.meta_recommendations = recommendations
 
-            # Store the newly generated recommendations in history immediately
+            # Store the newly generated recommendations in history (bounded FIFO)
             if recommendations and isinstance(recommendations, str):
                 self.meta_recommendations_history.append(recommendations)
+                if len(self.meta_recommendations_history) > self.max_history_size:
+                    self.meta_recommendations_history = self.meta_recommendations_history[-self.max_history_size:]
                 logger.debug(
                     f"Added new recommendations to history "
                     f"(total: {len(self.meta_recommendations_history)})"
@@ -292,8 +296,8 @@ class MetaSummarizer:
             generation_ids.append(program.generation)
             patch_names.append(program.metadata["patch_name"])
             correct_programs.append(program.correct)
-            user_msg = META_STEP1_USER_MSG.replace(
-                "{individual_program_msg}", individual_program_msg
+            user_msg = META_STEP1_USER_MSG.format(
+                individual_program_msg=individual_program_msg
             )
             user_messages.append(user_msg)
 
@@ -310,26 +314,18 @@ class MetaSummarizer:
             logger.error("Step 1: Failed to get responses from meta LLM client")
             return None
 
-        # Filter out None responses and combine summaries
-        valid_responses = [r for r in responses if r is not None]
-        if not valid_responses:
-            logger.error("Step 1: All batch responses were None")
-            return None
-
-        # Combine all individual summaries
-        combined_summaries = []
-        for i, response in enumerate(valid_responses):
-            if response and response.content:
-                program_summary = response.content.strip()
-                program_summary += "\n**Program Identifier:** "
-                program_summary += f"Generation {generation_ids[i]} - Patch Name {patch_names[i]} - Correct Program: {correct_programs[i]}"
-                combined_summaries.append(program_summary)
-            else:
+        # Combine summaries, skipping None responses while preserving index alignment
+        summaries_with_gen = []
+        for i, response in enumerate(responses):
+            if response is None or not response.content:
                 logger.warning(f"Step 1: Empty response for program {i}")
+                continue
+            program_summary = response.content.strip()
+            program_summary += "\n**Program Identifier:** "
+            program_summary += f"Generation {generation_ids[i]} - Patch Name {patch_names[i]} - Correct Program: {correct_programs[i]}"
+            summaries_with_gen.append((generation_ids[i], program_summary))
 
-        # Sort combined_summaries by generation (using generation_ids)
-        # Zip together summaries and their generation, sort, then extract summaries
-        summaries_with_gen = list(zip(generation_ids, combined_summaries))
+        # Sort by generation
         summaries_with_gen.sort(key=lambda x: x[0])
         combined_summaries = [summary for _, summary in summaries_with_gen]
 
@@ -353,8 +349,6 @@ class MetaSummarizer:
 
         # Format best program information
         if best_program:
-            from evolve_anything.prompts import construct_individual_program_msg
-
             best_program_info = construct_individual_program_msg(
                 best_program,
                 language=self.language,
@@ -362,8 +356,6 @@ class MetaSummarizer:
             )
         else:
             best_program_info = "*No best program information available.*"
-
-        llm_params = self.meta_llm_client.get_kwargs()
 
         # Research Phase
         research_summary = "*No research performed.*"
@@ -463,7 +455,7 @@ class MetaSummarizer:
                             research_summary = summary_response.content.strip()
                             logger.info("Research summary generated.")
 
-                            # Store in research history
+                            # Store in research history (bounded FIFO)
                             self.meta_research_history.append(
                                 {
                                     "timestamp": time.time(),
@@ -471,6 +463,8 @@ class MetaSummarizer:
                                     "summary": research_summary,
                                 }
                             )
+                            if len(self.meta_research_history) > self.max_history_size:
+                                self.meta_research_history = self.meta_research_history[-self.max_history_size:]
 
                         else:
                             logger.warning("Failed to generate research summary.")
@@ -486,11 +480,11 @@ class MetaSummarizer:
         else:
             logger.info("Brave Search API key not set, skipping research phase.")
 
-        user_msg = (
-            META_STEP2_USER_MSG.replace("{individual_summaries}", individual_summaries)
-            .replace("{previous_insights}", previous_insights)
-            .replace("{best_program_info}", best_program_info)
-            .replace("{research_summary}", research_summary)
+        user_msg = META_STEP2_USER_MSG.format(
+            individual_summaries=individual_summaries,
+            previous_insights=previous_insights,
+            best_program_info=best_program_info,
+            research_summary=research_summary,
         )
         llm_params = self.meta_llm_client.get_kwargs()
         response = self.meta_llm_client.query(
@@ -516,8 +510,6 @@ class MetaSummarizer:
 
         # Format best program information
         if best_program:
-            from evolve_anything.prompts import construct_individual_program_msg
-
             best_program_info = construct_individual_program_msg(
                 best_program,
                 language=self.language,
@@ -526,11 +518,11 @@ class MetaSummarizer:
         else:
             best_program_info = "*No best program information available.*"
 
-        user_msg = (
-            META_STEP3_USER_MSG.replace("{global_insights}", global_insights)
-            .replace("{previous_recommendations}", previous_recommendations)
-            .replace("{max_recommendations}", str(self.max_recommendations))
-            .replace("{best_program_info}", best_program_info)
+        user_msg = META_STEP3_USER_MSG.format(
+            global_insights=global_insights,
+            previous_recommendations=previous_recommendations,
+            max_recommendations=str(self.max_recommendations),
+            best_program_info=best_program_info,
         )
 
         llm_params = self.meta_llm_client.get_kwargs()

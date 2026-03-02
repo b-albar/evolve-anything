@@ -64,7 +64,7 @@ class DatabaseDisplay:
             show_header=True,
             header_style="bold cyan",
             padding=(0, 1),
-            width=120,  # Set fixed width for the table
+            width=140,  # Set fixed width for the table
         )
 
         # Add columns for each piece of information
@@ -76,7 +76,7 @@ class DatabaseDisplay:
         )
         table.add_column("Island", style="magenta", justify="center", width=8)
         table.add_column("Status", style="white", justify="center", width=14)
-        table.add_column("Score", style="white", justify="right", width=8)
+        table.add_column("Score", style="white", justify="right", width=15)
         table.add_column(
             "Patch Name",
             style="yellow",
@@ -399,7 +399,7 @@ class DatabaseDisplay:
             border_style="green",
             box=rich.box.ROUNDED,
             show_lines=True,
-            width=120,  # Match program summary table width
+            width=140,  # Match program summary table width
         )
         # Columns designed to fit within 120 width
         highlight_table.add_column(
@@ -408,7 +408,7 @@ class DatabaseDisplay:
         highlight_table.add_column("Gen", style="cyan bold", justify="center", width=6)
         highlight_table.add_column("✓/✗", style="red bold", justify="center", width=4)
         highlight_table.add_column(
-            "Score", style="green bold", justify="right", width=8
+            "Score", style="green bold", justify="right", width=15
         )
         highlight_table.add_column(
             "Complexity", style="yellow", justify="right", width=10
@@ -572,7 +572,7 @@ class DatabaseDisplay:
             border_style="red",
             show_header=True,
             header_style="bold cyan",
-            width=120,  # Match program summary table width
+            width=140,  # Match program summary table width
         )
 
         # Add columns matching program summary structure
@@ -580,7 +580,7 @@ class DatabaseDisplay:
         table.add_column("Gen", style="magenta", justify="center", width=5)
         table.add_column("Island", style="red", justify="center", width=8)
         table.add_column("✓/✗", style="white", justify="center", width=6)
-        table.add_column("Score", style="green", justify="right", width=8)
+        table.add_column("Score", style="green", justify="right", width=15)
         table.add_column(
             "Patch Name",
             style="yellow",

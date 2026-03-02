@@ -51,18 +51,6 @@ class IslandStrategy(ABC):
 class DefaultIslandAssignmentStrategy(IslandStrategy):
     """Default strategy for assigning programs to islands."""
 
-    def get_initialized_islands(self) -> List[int]:
-        self.cursor.execute(
-            """SELECT DISTINCT island_idx FROM programs
-                WHERE correct = 1 AND island_idx IS NOT NULL"""
-        )
-        islands_with_correct = {
-            row["island_idx"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
-        return list(islands_with_correct)
-
     def assign_island(self, program: Any) -> None:
         """
         Assigns an island index to a program.
@@ -112,18 +100,6 @@ class DefaultIslandAssignmentStrategy(IslandStrategy):
 
 class CopyInitialProgramIslandStrategy(IslandStrategy):
     """Strategy that copies the initial program to each island."""
-
-    def get_initialized_islands(self) -> List[int]:
-        self.cursor.execute(
-            """SELECT DISTINCT island_idx FROM programs
-                WHERE correct = 1 AND island_idx IS NOT NULL"""
-        )
-        islands_with_correct = {
-            row["island_idx"]
-            for row in self.cursor.fetchall()
-            if row["island_idx"] is not None
-        }
-        return list(islands_with_correct)
 
     def assign_island(self, program: Any) -> None:
         """

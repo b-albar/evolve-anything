@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 import difflib
 import logging
-from typing import Union, Optional, List, Tuple
+from typing import Dict, Union, Optional, List, Tuple
 
 # Import directly from module to avoid circular import through core/__init__.py
 import evolve_anything.utils.format_config as format_config
@@ -13,6 +13,8 @@ PATCH_PATTERN = re.compile(
     r"<{7}\s*SEARCH\s*\n(.*?)\n\s*={7}\s*\n(.*?)\n\s*>{7}\s*REPLACE\s*",
     re.DOTALL,
 )
+
+FILE_HEADER_PATTERN = re.compile(r"^FILE:\s*(\S+)\s*$", re.MULTILINE)
 
 
 # Compile patterns using format config constants
@@ -149,6 +151,16 @@ def _clean_evolve_markers(text: str) -> str:
     return cleaned_text
 
 
+def _strip_evolve_markers_from_patch(patch_str: str, language: str) -> str:
+    """Remove EVOLVE-BLOCK marker lines from patch text for the given language."""
+    comment_char = format_config.get_comment_char(language)
+    evolve_start = format_config.DEFAULT_FORMAT.evolve_block_start
+    evolve_end = format_config.DEFAULT_FORMAT.evolve_block_end
+    patch_str = re.sub(rf"{re.escape(comment_char)} {evolve_start}\\n", "", patch_str)
+    patch_str = re.sub(rf"{re.escape(comment_char)} {evolve_end}\\n", "", patch_str)
+    return patch_str
+
+
 def redact_immutable(text: str, no_state: bool = False) -> str:
     out = []
     for a, b in _mutable_ranges(text):
@@ -169,8 +181,6 @@ def _find_similar_lines(
     search_line: str, original_text: str, max_suggestions: int = 3
 ) -> List[Tuple[str, int]]:
     """Find similar lines in the original text for suggestions."""
-    import difflib
-
     search_line_clean = search_line.strip()
     if not search_line_clean:
         return []
@@ -197,8 +207,6 @@ def _find_best_match_with_diff(
     search_text: str, original_text: str
 ) -> Optional[Tuple[str, int, List[str]]]:
     """Find the best matching block and return a diff comparison."""
-    import difflib
-
     search_lines = search_text.strip().splitlines()
     if not search_lines:
         return None
@@ -517,9 +525,9 @@ def _create_evolve_block_error(
     error_parts.extend(
         [
             "Suggestions:",
-            "1. Move your edit to within an {format_config.DEFAULT_FORMAT.evolve_block_comment} region",
+            f"1. Move your edit to within an {format_config.DEFAULT_FORMAT.evolve_block_comment} region",
             "2. Check if similar code exists in the editable regions above",
-            "3. Ensure your search text targets code within {format_config.DEFAULT_FORMAT.evolve_block_start}/{format_config.DEFAULT_FORMAT.evolve_block_end} markers",
+            f"3. Ensure your search text targets code within {format_config.DEFAULT_FORMAT.evolve_block_start}/{format_config.DEFAULT_FORMAT.evolve_block_end} markers",
         ]
     )
 
@@ -533,7 +541,7 @@ def _create_no_evolve_block_error(original_text: str, operation: str) -> str:
     error_parts = [
         f"Cannot perform {operation}: No {format_config.DEFAULT_FORMAT.evolve_block_comment} regions found",
         "",
-        "The code must contain {format_config.DEFAULT_FORMAT.evolve_block_comment} regions to be editable.",
+        f"The code must contain {format_config.DEFAULT_FORMAT.evolve_block_comment} regions to be editable.",
         "",
         "Current file structure:",
     ]
@@ -552,19 +560,19 @@ def _create_no_evolve_block_error(original_text: str, operation: str) -> str:
             "```",
             "# Your immutable code here",
             "",
-            "# {format_config.DEFAULT_FORMAT.evolve_block_start}",
+            f"# {format_config.DEFAULT_FORMAT.evolve_block_start}",
             "# Your editable code goes here",
             "def function():",
             "    pass",
-            "# {format_config.DEFAULT_FORMAT.evolve_block_end}",
+            f"# {format_config.DEFAULT_FORMAT.evolve_block_end}",
             "",
             "# More immutable code here",
             "```",
             "",
             "Suggestions:",
-            "1. Add {format_config.DEFAULT_FORMAT.evolve_block_start} and {format_config.DEFAULT_FORMAT.evolve_block_end} markers around editable code",
+            f"1. Add {format_config.DEFAULT_FORMAT.evolve_block_start} and {format_config.DEFAULT_FORMAT.evolve_block_end} markers around editable code",
             "2. Ensure the markers are properly formatted (with # for Python, // for C/C++)",
-            "3. Check that there's at least one {format_config.DEFAULT_FORMAT.evolve_block_comment} region in the file",
+            f"3. Check that there's at least one {format_config.DEFAULT_FORMAT.evolve_block_comment} region in the file",
         ]
     )
 
@@ -575,11 +583,15 @@ def apply_search_replace(
     patch_text: str,
     original: str,
     strict: bool = True,
+    enforce_evolve_blocks: bool = True,
 ) -> tuple[str, int]:
     """
     Apply SEARCH/REPLACE blocks but **only** inside EVOLVE regions.
     Mutable ranges are recalculated after each replacement to account for
     text changes.
+
+    When enforce_evolve_blocks=False and no EVOLVE-BLOCK markers are found,
+    the entire file is treated as mutable (used for multi-file programs).
     """
     new_text = original
     num_applied = 0
@@ -595,6 +607,10 @@ def apply_search_replace(
 
         # Recalculate mutable ranges based on current text state
         mutable = _mutable_ranges(new_text)
+
+        # When evolve blocks not enforced and none found, entire file is mutable
+        if not mutable and not enforce_evolve_blocks:
+            mutable = [(0, len(new_text))]
 
         # ── insertions ───────────────────────────────────────────────────────
         if not search.strip():  # empty SEARCH  → insertion
@@ -704,15 +720,9 @@ def apply_diff_patch(
     num_applied: int = 0
     output_path: Optional[Path] = None
 
-    # Strip trailing whitespace from patch text
+    # Strip trailing whitespace and EVOLVE-BLOCK markers from patch text
     patch_str = _strip_trailing_whitespace(patch_str)
-
-    # Get comment character for the language and remove EVOLVE-BLOCK markers
-    comment_char = format_config.get_comment_char(language)
-    evolve_start = format_config.DEFAULT_FORMAT.evolve_block_start
-    evolve_end = format_config.DEFAULT_FORMAT.evolve_block_end
-    patch_str = re.sub(rf"{re.escape(comment_char)} {evolve_start}\\n", "", patch_str)
-    patch_str = re.sub(rf"{re.escape(comment_char)} {evolve_end}\\n", "", patch_str)
+    patch_str = _strip_evolve_markers_from_patch(patch_str, language)
 
     if patch_dir is not None:
         patch_dir = Path(patch_dir)
@@ -722,10 +732,7 @@ def apply_diff_patch(
         patch_path.write_text(patch_str, "utf-8")
 
     try:
-        # Apply the patch
-        applied_content, patches_count = apply_search_replace(patch_str, original)
-        updated_content = applied_content
-        num_applied = patches_count
+        updated_content, num_applied = apply_search_replace(patch_str, original)
     except PatchError as e:
         error_message = str(e)
         # Return original content, 0 applied, no output path, error msg
@@ -765,3 +772,152 @@ def apply_diff_patch(
         )
     else:
         return (updated_content, num_applied, None, error_message, None, None)
+
+
+def _get_main_file_key(files: Dict[str, str], language: str) -> str:
+    """Get the key for the main file in a files dict."""
+    ext = format_config.get_file_extension(language)
+    main_name = f"main.{ext}"
+    if main_name in files:
+        return main_name
+    return next(iter(files.keys()))
+
+
+def _split_patch_by_file(patch_text: str) -> Dict[str, str]:
+    """Split patch text by FILE: headers into per-file sections.
+
+    Returns a dict mapping file paths to their patch content.
+    If no FILE headers are found, returns empty dict.
+    """
+    headers = list(FILE_HEADER_PATTERN.finditer(patch_text))
+    if not headers:
+        return {}
+
+    sections: Dict[str, str] = {}
+    for i, match in enumerate(headers):
+        file_path = match.group(1)
+        start = match.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(patch_text)
+        content = patch_text[start:end].strip()
+        if content:
+            if file_path in sections:
+                sections[file_path] += "\n" + content
+            else:
+                sections[file_path] = content
+    return sections
+
+
+def apply_diff_patch_multifile(
+    patch_str: str,
+    files: Dict[str, str],
+    patch_dir: Optional[Union[str, Path]] = None,
+    language: str = "python",
+    verbose: bool = True,
+) -> tuple[str, int, Optional[Path], Optional[str], Optional[str], Optional[Path]]:
+    """Apply SEARCH/REPLACE diff patches to multiple files.
+
+    Returns the same 6-tuple as apply_diff_patch for compatibility.
+    The first element is the content of the main file.
+    """
+    patch_str = _strip_trailing_whitespace(patch_str)
+
+    patch_str = _strip_evolve_markers_from_patch(patch_str, language)
+
+    # Split by FILE headers
+    file_patches = _split_patch_by_file(patch_str)
+
+    if not file_patches:
+        # No FILE headers — fall back to single-file on the main file
+        main_key = _get_main_file_key(files, language)
+        return apply_diff_patch(
+            patch_str=patch_str,
+            original_str=files[main_key],
+            patch_dir=patch_dir,
+            language=language,
+            verbose=verbose,
+        )
+
+    if patch_dir is not None:
+        patch_dir = Path(patch_dir)
+        patch_dir.mkdir(parents=True, exist_ok=True)
+        (patch_dir / "search_replace.txt").write_text(patch_str, "utf-8")
+
+    # Apply patches per-file
+    updated_files = dict(files)
+    total_applied = 0
+    errors = []
+
+    for file_path, file_patch in file_patches.items():
+        if file_path not in files:
+            errors.append(
+                f"FILE '{file_path}' not found in program files. "
+                f"Available: {list(files.keys())}"
+            )
+            continue
+
+        original = _strip_trailing_whitespace(files[file_path])
+        file_patch = _strip_trailing_whitespace(file_patch)
+
+        try:
+            updated, num_applied = apply_search_replace(
+                file_patch, original, enforce_evolve_blocks=False
+            )
+            updated_files[file_path] = updated
+            total_applied += num_applied
+        except PatchError as e:
+            errors.append(f"Error in FILE '{file_path}': {str(e)}")
+
+    if errors:
+        error_message = "\n\n".join(errors)
+        main_key = _get_main_file_key(files, language)
+        return files[main_key], 0, None, error_message, None, None
+
+    # Write files to disk
+    output_path = None
+    diff_text = None
+    diff_path_result = None
+
+    if patch_dir is not None:
+        # Write original backups
+        for file_path, content in files.items():
+            backup_name = f"original_{file_path.replace('/', '_')}"
+            (patch_dir / backup_name).write_text(content, "utf-8")
+
+        # Write updated files
+        for file_path, content in updated_files.items():
+            out = patch_dir / file_path
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(content, "utf-8")
+
+        # Write combined diff
+        all_diffs = []
+        for file_path in sorted(updated_files.keys()):
+            if file_path in files and files[file_path] != updated_files[file_path]:
+                diff_lines = difflib.unified_diff(
+                    files[file_path].splitlines(keepends=True),
+                    updated_files[file_path].splitlines(keepends=True),
+                    fromfile=f"a/{file_path}",
+                    tofile=f"b/{file_path}",
+                    n=3,
+                )
+                all_diffs.extend(diff_lines)
+
+        diff_path_result = patch_dir / "edit.diff"
+        diff_text = "".join(all_diffs)
+        diff_path_result.write_text(diff_text, "utf-8")
+
+        main_key = _get_main_file_key(files, language)
+        output_path = patch_dir / main_key
+
+        if verbose:
+            logger.debug(f"Multi-file patch written to: {patch_dir}")
+
+    main_key = _get_main_file_key(files, language)
+    return (
+        updated_files.get(main_key, ""),
+        total_applied,
+        output_path,
+        None,
+        diff_text,
+        diff_path_result,
+    )

@@ -113,7 +113,7 @@ class LLMClient:
         self,
         msg: str,
         system_msg: str,
-        msg_history: List[Dict] = [],
+        msg_history: Optional[List[Dict]] = None,
         llm_kwargs: Optional[Dict] = None,
     ) -> Optional[QueryResult]:
         """
@@ -128,6 +128,8 @@ class LLMClient:
         Returns:
             QueryResult or None if all retries failed
         """
+        if msg_history is None:
+            msg_history = []
         if llm_kwargs is None:
             llm_kwargs = sample_model_kwargs(
                 model_names=self.model_names,
@@ -200,7 +202,7 @@ class LLMClient:
         num_samples: int,
         msg: Union[str, List[str]],
         system_msg: Union[str, List[str]],
-        msg_history: Union[List[Dict], List[List[Dict]]] = [],
+        msg_history: Optional[Union[List[Dict], List[List[Dict]]]] = None,
         llm_kwargs: Optional[List[Dict]] = None,
     ) -> List[QueryResult]:
         """
@@ -221,8 +223,8 @@ class LLMClient:
             msg = [msg] * num_samples
         if isinstance(system_msg, str):
             system_msg = [system_msg] * num_samples
-        if len(msg_history) == 0:
-            msg_history = [[]] * num_samples
+        if msg_history is None or len(msg_history) == 0:
+            msg_history = [[] for _ in range(num_samples)]
         elif isinstance(msg_history[0], dict):
             msg_history = [msg_history] * num_samples
 
@@ -289,7 +291,7 @@ class LLMClient:
         num_samples: int,
         msg: Union[str, List[str]],
         system_msg: Union[str, List[str]],
-        msg_history: Union[List[Dict], List[List[Dict]]] = [],
+        msg_history: Optional[Union[List[Dict], List[List[Dict]]]] = None,
     ) -> List[QueryResult]:
         """
         Batch query the LLM with auto-sampled kwargs.

@@ -56,7 +56,7 @@ def construct_eval_history_msg(
     """Construct an edit message for the given parent program and
     inspiration programs."""
     inspiration_str = (
-        "Here are the performance metrics of a set of prioviously "
+        "Here are the performance metrics of a set of previously "
         "implemented programs:\n\n"
     )
     for i, prog in enumerate(inspiration_programs):
@@ -77,6 +77,67 @@ def construct_eval_history_msg(
                 inspiration_str += f"Text feedback:\n{feedback_text.strip()}\n\n"
 
     return inspiration_str
+
+
+def format_learning_log(
+    ancestor_chain: List["Program"],
+    minimize: bool = False,
+) -> str:
+    """Format ancestor mutations as a learning log for the LLM.
+
+    The ancestor_chain is [parent, grandparent, ...] (nearest first).
+    We reverse it so the LLM reads oldest-to-newest (chronological).
+    Each entry shows what was tried and whether it helped.
+    """
+    if not ancestor_chain:
+        return ""
+
+    entries = []
+    # Reverse for chronological order (oldest ancestor first)
+    chronological = list(reversed(ancestor_chain))
+    for i, program in enumerate(chronological):
+        meta = program.metadata or {}
+        patch_name = meta.get("patch_name", "unnamed")
+        patch_desc = meta.get("patch_description", "unknown change")
+        score = program.combined_score
+        correct = program.correct
+        status = "correct" if correct else "incorrect"
+
+        # Compute score delta: compare this program to the next one in chain
+        # (its child, which is the next item chronologically)
+        if i + 1 < len(chronological):
+            child_score = chronological[i + 1].combined_score
+            delta = child_score - score
+            better = (delta > 0) != minimize  # XOR: positive delta = better when maximizing
+            direction = "improved" if better else "worsened"
+            outcome = f"child score {direction} by {abs(delta):.4f}"
+        else:
+            # Last in chain = direct parent of the current program
+            outcome = f"current parent, score: {score:.4f}"
+
+        entries.append(f"- **{patch_name}**: {patch_desc} -> {outcome} ({status})")
+
+    header = (
+        "# Learning Log (Recent Ancestor Mutations)\n"
+        "These are recent changes in this lineage and their outcomes. "
+        "Avoid repeating approaches that worsened the score.\n\n"
+    )
+    return header + "\n".join(entries) + "\n"
+
+
+def format_program_files(files: Dict[str, str], language: str) -> str:
+    """Format program files for LLM display.
+
+    Single-file programs get a plain fenced code block.
+    Multi-file programs get per-file headers with separate fences.
+    """
+    if len(files) <= 1:
+        code = next(iter(files.values()), "")
+        return f"```{language}\n{code}\n```"
+    parts = []
+    for path, content in sorted(files.items()):
+        parts.append(f"### FILE: {path}\n```{language}\n{content}\n```")
+    return "\n\n".join(parts)
 
 
 def construct_individual_program_msg(

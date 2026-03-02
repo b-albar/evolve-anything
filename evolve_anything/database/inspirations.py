@@ -52,7 +52,7 @@ class ArchiveInspirationSelector(ContextSelectorStrategy):
         if n <= 0:
             return []
         if not hasattr(self.config, "elite_selection_ratio"):
-            raise ConnectionError(
+            raise ValueError(
                 "Config missing elite_selection_ratio for inspiration sampling."
             )
 
@@ -69,11 +69,7 @@ class ArchiveInspirationSelector(ContextSelectorStrategy):
         if self.best_program_id and self.best_program_id not in insp_ids:
             prog = self.get_program(self.best_program_id)
             if prog and prog.correct:
-                if enforce_separation:
-                    if prog.island_idx == parent_island_idx:
-                        inspirations.append(prog)
-                        insp_ids.add(prog.id)
-                else:
+                if not enforce_separation or prog.island_idx == parent_island_idx:
                     inspirations.append(prog)
                     insp_ids.add(prog.id)
 

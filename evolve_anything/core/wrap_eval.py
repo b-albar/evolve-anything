@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import sys
 import time
 import numpy as np
 import pickle
@@ -18,7 +19,16 @@ DEFAULT_METRICS_ON_ERROR = {
 
 
 def load_program(program_path: str) -> Any:
-    """Loads a Python module dynamically from a given file path."""
+    """Loads a Python module dynamically from a given file path.
+
+    For multi-file programs, the program's directory is added to sys.path
+    so that cross-file imports (e.g., ``from utils.helper import foo``) work.
+    """
+    # Add program's directory to sys.path for multi-file imports
+    program_dir = os.path.dirname(os.path.abspath(program_path))
+    if program_dir not in sys.path:
+        sys.path.insert(0, program_dir)
+
     spec = importlib.util.spec_from_file_location("program", program_path)
     if spec is None:
         raise ImportError(f"Could not load spec for module at {program_path}")
@@ -173,7 +183,7 @@ def run_evo_eval(
             metrics.setdefault("num_valid_runs", 0)
             # Best guess for invalid runs if an exception occurs mid-evaluation
             num_potential_runs = num_runs
-            if all_run_results is not None:
+            if all_run_results:
                 num_potential_runs = len(all_run_results)
             metrics.setdefault("num_invalid_runs", num_potential_runs)
             metrics.setdefault("all_validation_errors", [str(e)])

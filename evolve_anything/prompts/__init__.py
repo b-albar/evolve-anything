@@ -1,6 +1,8 @@
 from .prompts_base import (
     construct_eval_history_msg,
     construct_individual_program_msg,
+    format_learning_log,
+    format_program_files,
     perf_str,
     format_text_feedback_section,
     BASE_SYSTEM_MSG,
@@ -34,6 +36,8 @@ from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
 __all__ = [
     "construct_eval_history_msg",
     "construct_individual_program_msg",
+    "format_learning_log",
+    "format_program_files",
     "perf_str",
     "format_text_feedback_section",
     "BASE_SYSTEM_MSG",

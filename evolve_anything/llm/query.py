@@ -138,7 +138,7 @@ def query(
     model_name: str,
     msg: str,
     system_msg: str,
-    msg_history: List = [],
+    msg_history: Optional[List] = None,
     output_model: Optional[Type[BaseModel]] = None,
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
@@ -160,6 +160,8 @@ def query(
     Returns:
         QueryResult containing the response and metadata
     """
+    if msg_history is None:
+        msg_history = []
     provider = _get_provider(model_name)
     api_model_name = _normalize_model_name(model_name)
 
@@ -183,7 +185,7 @@ async def query_async(
     model_name: str,
     msg: str,
     system_msg: str,
-    msg_history: List = [],
+    msg_history: Optional[List] = None,
     output_model: Optional[Type[BaseModel]] = None,
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
@@ -205,6 +207,8 @@ async def query_async(
     Returns:
         QueryResult containing the response and metadata
     """
+    if msg_history is None:
+        msg_history = []
     provider = _get_provider(model_name)
     api_model_name = _normalize_model_name(model_name)
 

@@ -7,7 +7,7 @@ import logging
 import yaml
 from rich.logging import RichHandler
 from rich.console import Console
-from typing import List, Optional, Union, cast
+from typing import Dict, List, Optional, Union, cast
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -23,12 +23,15 @@ from evolve_anything.llm import (
 )
 from evolve_anything.edit import (
     apply_diff_patch,
+    apply_diff_patch_multifile,
     apply_full_patch,
+    apply_full_patch_multifile,
     summarize_diff,
     redact_immutable,
 )
 from evolve_anything.core.sampler import PromptSampler
 from evolve_anything.core.summarizer import MetaSummarizer
+from evolve_anything.prompts import format_learning_log
 from evolve_anything.core.novelty_judge import NoveltyJudge
 from evolve_anything.core.patch_metadata import PatchMetadata
 from evolve_anything.utils.format_config import (
@@ -37,10 +40,42 @@ from evolve_anything.utils.format_config import (
     get_comment_char,
 )
 
-from line_profiler import profile
-
 FOLDER_PREFIX = "gen"
 LOG_SEPARATOR = "=" * 80
+
+# File extensions to exclude when reading program files from directories
+_EXCLUDE_EXTENSIONS = {".pyc", ".pyo", ".so", ".o", ".a", ".dylib"}
+_EXCLUDE_DIRS = {"__pycache__", ".git", "results", ".mypy_cache"}
+
+
+def _read_program_files(directory: Path, lang_ext: str) -> Dict[str, str]:
+    """Read all program source files from a generation directory.
+
+    Returns a dict mapping relative paths to file contents.
+    Skips non-source files (results, __pycache__, binaries).
+    """
+    files = {}
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        # Skip excluded dirs
+        if any(part in _EXCLUDE_DIRS for part in path.parts):
+            continue
+        # Skip excluded extensions and non-source files
+        if path.suffix in _EXCLUDE_EXTENSIONS:
+            continue
+        # Skip results, backup, and diff files
+        if path.name in ("original." + lang_ext, "edit.diff", "search_replace.txt", "rewrite.txt"):
+            continue
+        rel = path.relative_to(directory)
+        # Skip files in results/ subdirectory
+        if str(rel).startswith("results"):
+            continue
+        try:
+            files[str(rel)] = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+    return files
 
 
 def _fmt_score(x) -> str:
@@ -126,6 +161,7 @@ class EvolutionConfig:
         ]
     )
     validation_command: Optional[str] = None
+    learning_log_depth: int = 5  # Ancestor depth for learning log (0 disables)
 
 
 @dataclass
@@ -494,7 +530,6 @@ class EvolutionRunner:
         logger.info(f"Evolution run ended at {end_time}")
         logger.info(LOG_SEPARATOR)
 
-    @profile
     def generate_initial_program(self):
         """Generate initial program with LLM, with retries."""
         llm_kwargs = self.llm.get_kwargs()
@@ -678,6 +713,10 @@ class EvolutionRunner:
             logger.warning(f"Could not read code for {exec_fname}. Error: {e}")
             evaluated_code = ""
 
+        # Read all program files from the generation directory
+        gen_dir = Path(exec_fname).parent
+        program_files = _read_program_files(gen_dir, self.lang_ext)
+
         # Parse results
         parsed = self._parse_results(results)
 
@@ -706,6 +745,7 @@ class EvolutionRunner:
             private_metrics=parsed["private_metrics"],
             text_feedback=parsed["text_feedback"],
             metadata=metadata,
+            files=program_files,
         )
 
         self.db.add(db_program, verbose=True)
@@ -766,7 +806,6 @@ class EvolutionRunner:
 
         return db_program
 
-    @profile
     def _run_generation_0(self):
         """Setup and run generation 0 to initialize the database."""
         initial_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0"
@@ -783,11 +822,21 @@ class EvolutionRunner:
         total_output_tokens = 0
 
         if self.evo_config.init_program_path:
+            init_path = Path(self.evo_config.init_program_path)
             if self.verbose:
                 logger.info(
                     f"Copying initial program from {self.evo_config.init_program_path}"
                 )
-            shutil.copy(self.evo_config.init_program_path, exec_fname)
+            if init_path.is_dir():
+                # Multi-file: copy entire directory contents
+                for src in init_path.rglob("*"):
+                    if src.is_file():
+                        rel = src.relative_to(init_path)
+                        dst = Path(initial_dir) / rel
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+            else:
+                shutil.copy(self.evo_config.init_program_path, exec_fname)
         else:
             if self.verbose:
                 logger.info(
@@ -876,6 +925,16 @@ class EvolutionRunner:
         top_k_insp_ids = [p.id for p in top_k_programs]
         parent_id = parent_program.id
 
+        # Build learning log from ancestor chain
+        learning_log = ""
+        if self.evo_config.learning_log_depth > 0:
+            ancestor_chain = self.db.get_ancestor_chain(
+                parent_program.id, self.evo_config.learning_log_depth
+            )
+            learning_log = format_learning_log(
+                ancestor_chain, self.evo_config.minimize
+            )
+
         if self.verbose:
             logger.info(f"Prepared generation {current_gen}: parent={parent_id[:8]}...")
 
@@ -893,6 +952,7 @@ class EvolutionRunner:
             "meta_recs": meta_recs,
             "meta_summary": meta_summary,
             "meta_scratch": meta_scratch,
+            "learning_log": learning_log,
         }
 
     def _run_patch_in_thread(self, job_context: dict) -> dict:
@@ -920,6 +980,7 @@ class EvolutionRunner:
             current_gen,
             novelty_attempt=1,
             resample_attempt=1,
+            learning_log=job_context.get("learning_log", ""),
         )
 
         # Add meta-recommendations/summary/scratchpad to meta_patch_data
@@ -1100,6 +1161,7 @@ class EvolutionRunner:
         generation: int,
         novelty_attempt: int = 1,
         resample_attempt: int = 1,
+        learning_log: str = "",
     ) -> tuple[Optional[str], dict, int]:
         """Run patch generation for a specific generation."""
         max_patch_attempts = self.evo_config.max_patch_attempts
@@ -1116,12 +1178,14 @@ class EvolutionRunner:
             archive_inspirations=archive_programs,
             top_k_inspirations=top_k_programs,
             meta_recommendations=meta_recs,
+            learning_log=learning_log,
         )
 
+        is_multifile = len(parent_program.files) > 1
         if patch_type in ["full", "cross"]:
-            apply_patch = apply_full_patch
+            apply_patch = apply_full_patch_multifile if is_multifile else apply_full_patch
         elif patch_type == "diff":
-            apply_patch = apply_diff_patch
+            apply_patch = apply_diff_patch_multifile if is_multifile else apply_diff_patch
         elif patch_type == "paper":
             raise NotImplementedError("Paper edit not implemented.")
             # apply_patch = apply_paper_patch
@@ -1193,6 +1257,16 @@ class EvolutionRunner:
             )
 
             # Apply the code patch (diff/full rewrite)
+            patch_kwargs = dict(
+                patch_str=response.content,
+                patch_dir=f"{self.results_dir}/{FOLDER_PREFIX}_{generation}",
+                language=self.evo_config.language,
+                verbose=False,
+            )
+            if is_multifile:
+                patch_kwargs["files"] = parent_program.files
+            else:
+                patch_kwargs["original_str"] = parent_program.code
             (
                 _,
                 num_applied_attempt,
@@ -1200,13 +1274,7 @@ class EvolutionRunner:
                 error_attempt,
                 patch_txt_attempt,
                 patch_path,
-            ) = apply_patch(
-                original_str=parent_program.code,
-                patch_str=response.content,
-                patch_dir=f"{self.results_dir}/{FOLDER_PREFIX}_{generation}",
-                language=self.evo_config.language,
-                verbose=False,
-            )
+            ) = apply_patch(**patch_kwargs)
 
             if error_attempt is None and num_applied_attempt > 0:
                 # Run validation command if configured

@@ -182,6 +182,10 @@ class Program:
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Multi-file support: maps relative paths to file contents.
+    # Empty dict = single-file mode (use `code` field).
+    files: Dict[str, str] = field(default_factory=dict)
+
     # Archive status
     in_archive: bool = False
 
@@ -208,6 +212,9 @@ class Program:
         )
         data["metadata"] = (
             data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        )
+        data["files"] = (
+            data.get("files") if isinstance(data.get("files"), dict) else {}
         )
         # Ensure inspiration_ids is a list
         archive_ids_val = data.get("archive_inspiration_ids")
@@ -425,7 +432,8 @@ class ProgramDatabase:
                 children_count INTEGER NOT NULL DEFAULT 0,
                 metadata TEXT,      -- JSON serialized Dict[str, Any]
                 migration_history TEXT, -- JSON of migration events
-                island_idx INTEGER  -- Add island_idx to the schema
+                island_idx INTEGER,  -- Add island_idx to the schema
+                files TEXT           -- JSON serialized Dict[str, str] for multi-file programs
             )
             """
         )
@@ -489,8 +497,16 @@ class ProgramDatabase:
                 )
                 self.conn.commit()
                 logger.info("Successfully added text_feedback column")
+
+            if "files" not in columns:
+                logger.info("Adding files column to programs table")
+                self.cursor.execute(
+                    "ALTER TABLE programs ADD COLUMN files TEXT DEFAULT '{}'"
+                )
+                self.conn.commit()
+                logger.info("Successfully added files column")
         except sqlite3.Error as e:
-            logger.error(f"Error during text_feedback migration: {e}")
+            logger.error(f"Error during migration: {e}")
             # Don't raise - this is not critical for existing functionality
 
     @db_retry()
@@ -505,7 +521,7 @@ class ProgramDatabase:
         self.last_iteration = (
             int(row["value"]) if row and row["value"] is not None else 0
         )
-        if not row or row["value"] is not None:  # Initialize in DB if first time
+        if not row or row["value"] is None:  # Initialize in DB if first time
             if not self.read_only:
                 self._update_metadata_in_db("last_iteration", str(self.last_iteration))
 
@@ -614,6 +630,7 @@ class ProgramDatabase:
         embedding_pca_2d_json = json.dumps(program.embedding_pca_2d or [])
         embedding_pca_3d_json = json.dumps(program.embedding_pca_3d or [])
         migration_history_json = json.dumps(program.migration_history or [])
+        files_json = json.dumps(program.files or {})
 
         # Handle text_feedback - convert to string if it's a list
         text_feedback_str = program.text_feedback
@@ -638,9 +655,10 @@ class ProgramDatabase:
                     combined_score, public_metrics, private_metrics,
                     text_feedback, complexity, embedding, embedding_pca_2d,
                     embedding_pca_3d, embedding_cluster_id, correct,
-                    children_count, metadata, island_idx, migration_history)
+                    children_count, metadata, island_idx, migration_history,
+                    files)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?)
+                           ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     program.id,
@@ -666,6 +684,7 @@ class ProgramDatabase:
                     metadata_json,
                     program.island_idx,
                     migration_history_json,
+                    files_json,
                 ),
             )
 
@@ -742,119 +761,37 @@ class ProgramDatabase:
         self.check_scheduled_operations()
         return program.id
 
+    @staticmethod
+    def _safe_json_loads(text, default=None):
+        """Parse JSON text with fallback to default value."""
+        if not text:
+            return default() if callable(default) else (default if default is not None else {})
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return default() if callable(default) else (default if default is not None else {})
+
     def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:
         """Helper to create a Program object from a database row."""
         if not row:
             return None
 
         program_data = dict(row)
+        _jl = self._safe_json_loads
 
-        # Use faster json loads
-        public_metrics_text = program_data.get("public_metrics")
-        if public_metrics_text:
-            try:
-                program_data["public_metrics"] = json.loads(public_metrics_text)
-            except json.JSONDecodeError:
-                program_data["public_metrics"] = {}
-        else:
-            program_data["public_metrics"] = {}
+        # Deserialize JSON fields
+        for key in ("public_metrics", "private_metrics", "metadata", "files"):
+            program_data[key] = _jl(program_data.get(key), default=dict)
+        for key in (
+            "archive_inspiration_ids", "top_k_inspiration_ids",
+            "embedding", "embedding_pca_2d", "embedding_pca_3d",
+            "migration_history",
+        ):
+            program_data[key] = _jl(program_data.get(key), default=list)
 
-        private_metrics_text = program_data.get("private_metrics")
-        if private_metrics_text:
-            try:
-                program_data["private_metrics"] = json.loads(private_metrics_text)
-            except json.JSONDecodeError:
-                program_data["private_metrics"] = {}
-        else:
-            program_data["private_metrics"] = {}
-
-        # Same for metadata
-        metadata_text = program_data.get("metadata")
-        if metadata_text:
-            try:
-                program_data["metadata"] = json.loads(metadata_text)
-            except json.JSONDecodeError:
-                program_data["metadata"] = {}
-        else:
-            program_data["metadata"] = {}
-
-        # Handle text_feedback (simple string field)
         if "text_feedback" not in program_data or program_data["text_feedback"] is None:
             program_data["text_feedback"] = ""
 
-        # Handle inspiration_ids
-        archive_insp_ids_text = program_data.get("archive_inspiration_ids")
-        if archive_insp_ids_text:
-            try:
-                program_data["archive_inspiration_ids"] = json.loads(
-                    archive_insp_ids_text
-                )
-            except json.JSONDecodeError:
-                program_data["archive_inspiration_ids"] = []
-        else:
-            program_data["archive_inspiration_ids"] = []
-
-        top_k_insp_ids_text = program_data.get("top_k_inspiration_ids")
-        if top_k_insp_ids_text:
-            try:
-                program_data["top_k_inspiration_ids"] = json.loads(top_k_insp_ids_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Could not decode top_k_inspiration_ids for "
-                    f"program {program_data.get('id')}. "
-                    "Defaulting to empty list."
-                )
-                program_data["top_k_inspiration_ids"] = []
-        else:
-            program_data["top_k_inspiration_ids"] = []
-
-        # Handle embedding
-        embedding_text = program_data.get("embedding")
-        if embedding_text:
-            try:
-                program_data["embedding"] = json.loads(embedding_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Could not decode embedding for program "
-                    f"{program_data.get('id')}. Defaulting to empty list."
-                )
-                program_data["embedding"] = []
-        else:
-            program_data["embedding"] = []
-
-        embedding_pca_2d_text = program_data.get("embedding_pca_2d")
-        if embedding_pca_2d_text:
-            try:
-                program_data["embedding_pca_2d"] = json.loads(embedding_pca_2d_text)
-            except json.JSONDecodeError:
-                program_data["embedding_pca_2d"] = []
-        else:
-            program_data["embedding_pca_2d"] = []
-
-        embedding_pca_3d_text = program_data.get("embedding_pca_3d")
-        if embedding_pca_3d_text:
-            try:
-                program_data["embedding_pca_3d"] = json.loads(embedding_pca_3d_text)
-            except json.JSONDecodeError:
-                program_data["embedding_pca_3d"] = []
-        else:
-            program_data["embedding_pca_3d"] = []
-
-        # Handle migration_history
-        migration_history_text = program_data.get("migration_history")
-        if migration_history_text:
-            try:
-                program_data["migration_history"] = json.loads(migration_history_text)
-            except json.JSONDecodeError:
-                logger.warning(
-                    f"Could not decode migration_history for program "
-                    f"{program_data.get('id')}. Defaulting to empty list."
-                )
-                program_data["migration_history"] = []
-        else:
-            program_data["migration_history"] = []
-
-        # Handle archive status
         program_data["in_archive"] = bool(program_data.get("in_archive", 0))
 
         return Program.from_dict(program_data)
@@ -867,6 +804,30 @@ class ProgramDatabase:
         self.cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
         row = self.cursor.fetchone()
         return self._program_from_row(row)
+
+    @db_retry()
+    def get_ancestor_chain(self, program_id: str, max_depth: int = 5) -> List[Program]:
+        """Walk the parent_id chain up to max_depth ancestors.
+
+        Returns [parent, grandparent, ...] (nearest first).
+        """
+        if not self.cursor:
+            raise ConnectionError("DB not connected.")
+        chain = []
+        current_id = program_id
+        for _ in range(max_depth):
+            self.cursor.execute(
+                "SELECT parent_id FROM programs WHERE id = ?", (current_id,)
+            )
+            row = self.cursor.fetchone()
+            if not row or not row["parent_id"]:
+                break
+            parent = self.get(row["parent_id"])
+            if not parent:
+                break
+            chain.append(parent)
+            current_id = parent.id
+        return chain
 
     @db_retry()
     def sample(
@@ -929,6 +890,7 @@ class ProgramDatabase:
             update_metadata_func=self._update_metadata_in_db,
             get_best_program_func=self.get_best_program,
             map_elites_archive=self.map_elites_archive,
+            program_from_row_func=self._program_from_row,
         )
 
         parent = parent_selector.sample_parent(island_idx=sampled_island)
@@ -1546,45 +1508,6 @@ class ProgramDatabase:
         similarity = np.dot(arr1, arr2) / (norm_a * norm_b)
         return float(similarity)
 
-    @db_retry()
-    def compute_similarity_thread_safe(
-        self, vec: List[float], island_idx: int
-    ) -> List[float]:
-        """
-        Thread-safe version of similarity computation. Creates its own DB connection.
-        """
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT embedding FROM programs WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'",
-                (island_idx,),
-            )
-            rows = cursor.fetchall()
-
-            if not rows:
-                return []
-
-            similarities = []
-            for row in rows:
-                db_embedding = json.loads(row["embedding"])
-                if db_embedding:
-                    sim = self._cosine_similarity(vec, db_embedding)
-                    similarities.append(sim)
-            return similarities
-
-        except Exception as e:
-            logger.error(f"Thread-safe similarity computation failed: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
 
     @db_retry()
     def compute_similarity(
@@ -1698,90 +1621,6 @@ class ProgramDatabase:
             return self.get(most_similar_id)
         return None
 
-    @db_retry()
-    def get_most_similar_program_thread_safe(
-        self, code_embedding: List[float], island_idx: int
-    ) -> Optional[Program]:
-        """
-        Thread-safe version of get_most_similar_program that creates its own DB connection.
-
-        Args:
-            code_embedding: The embedding to compare against
-            island_idx: The island index to constrain the search to
-
-        Returns:
-            The most similar Program object, or None if not found
-        """
-        if not code_embedding:
-            logger.warning(
-                "Empty code embedding provided to get_most_similar_program_thread_safe"
-            )
-            return None
-
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # Get all programs in the specified island that have embeddings
-            cursor.execute(
-                """
-                SELECT id, embedding FROM programs
-                WHERE island_idx = ? AND embedding IS NOT NULL AND embedding != '[]'
-                """,
-                (island_idx,),
-            )
-
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-
-            # Compute similarities
-            import numpy as np
-
-            similarities = []
-            program_ids = []
-
-            for row in rows:
-                try:
-                    embedding = json.loads(row["embedding"])
-                    if embedding:  # Check if embedding is not empty
-                        similarity = np.dot(code_embedding, embedding) / (
-                            np.linalg.norm(code_embedding) * np.linalg.norm(embedding)
-                        )
-                        similarities.append(similarity)
-                        program_ids.append(row["id"])
-                except (json.JSONDecodeError, ValueError, ZeroDivisionError) as e:
-                    logger.warning(
-                        f"Error computing similarity for program {row['id']}: {e}"
-                    )
-                    continue
-
-            if not similarities:
-                return None
-
-            # Find the most similar program
-            max_similarity_idx = np.argmax(similarities)
-            most_similar_id = program_ids[max_similarity_idx]
-
-            # Get the full program data
-            cursor.execute("SELECT * FROM programs WHERE id = ?", (most_similar_id,))
-            row = cursor.fetchone()
-
-            if row:
-                return self._program_from_row(row)
-            return None
-
-        except Exception as e:
-            logger.error(f"Error in get_most_similar_program_thread_safe: {e}")
-            return None
-        finally:
-            if conn:
-                conn.close()
 
     @db_retry()
     def _recompute_embeddings_and_clusters(self, num_clusters: int = 4):
@@ -1857,226 +1696,5 @@ class ProgramDatabase:
             self.conn.rollback()
             logger.error("Failed to update programs with new embedding features: %s", e)
 
-    @db_retry()
-    def _recompute_embeddings_and_clusters_thread_safe(self, num_clusters: int = 4):
-        """
-        Thread-safe version of embedding recomputation. Creates its own DB connection.
-        """
-        if self.read_only:
-            return
 
-        conn = None
-        try:
-            # Create a new connection for this thread
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
 
-            cursor.execute(
-                "SELECT id, embedding FROM programs "
-                "WHERE embedding IS NOT NULL AND embedding != '[]'"
-            )
-            rows = cursor.fetchall()
-
-            if len(rows) < num_clusters:
-                if len(rows) > 0:
-                    logger.info(
-                        f"Not enough programs with embeddings ({len(rows)}) to "
-                        f"perform clustering. Need at least {num_clusters}."
-                    )
-                return
-
-            program_ids = [row["id"] for row in rows]
-            embeddings = [json.loads(row["embedding"]) for row in rows]
-
-            # Use EmbeddingClient for dim reduction and clustering
-            try:
-                logger.info(
-                    "Recomputing PCA-reduced embedding features for %s programs.",
-                    len(program_ids),
-                )
-
-                logger.info("Computing 2D PCA reduction...")
-                reduced_2d = self.embedding_client.get_dim_reduction(
-                    embeddings, method="pca", dims=2
-                )
-                logger.info("2D PCA reduction completed")
-
-                logger.info("Computing 3D PCA reduction...")
-                reduced_3d = self.embedding_client.get_dim_reduction(
-                    embeddings, method="pca", dims=3
-                )
-                logger.info("3D PCA reduction completed")
-
-                logger.info(f"Computing GMM clustering with {num_clusters} clusters...")
-                cluster_ids = self.embedding_client.get_embedding_clusters(
-                    embeddings, num_clusters=num_clusters
-                )
-                logger.info("GMM clustering completed")
-            except Exception as e:
-                logger.error(f"Failed to recompute embedding features: {e}")
-                return
-
-            # Update all programs in a single transaction
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                for i, program_id in enumerate(program_ids):
-                    embedding_pca_2d_json = json.dumps(reduced_2d[i].tolist())
-                    embedding_pca_3d_json = json.dumps(reduced_3d[i].tolist())
-                    cluster_id = int(cluster_ids[i])
-
-                    cursor.execute(
-                        """
-                        UPDATE programs
-                        SET embedding_pca_2d = ?,
-                            embedding_pca_3d = ?,
-                            embedding_cluster_id = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            embedding_pca_2d_json,
-                            embedding_pca_3d_json,
-                            cluster_id,
-                            program_id,
-                        ),
-                    )
-                conn.commit()
-                logger.info(
-                    "Successfully updated embedding features for %s programs.",
-                    len(program_ids),
-                )
-            except Exception as e:
-                conn.rollback()
-                logger.error(
-                    "Failed to update programs with new embedding features: %s", e
-                )
-                raise  # Re-raise exception
-
-        except Exception as e:
-            logger.error(f"Thread-safe embedding recomputation failed: {e}")
-            raise  # Re-raise exception
-
-        finally:
-            if conn:
-                conn.close()
-
-    @db_retry()
-    def get_programs_by_generation_thread_safe(self, generation: int) -> List[Program]:
-        """Thread-safe version of get_programs_by_generation."""
-        conn = None
-        try:
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT * FROM programs WHERE generation = ?", (generation,))
-            rows = cursor.fetchall()
-
-            programs = []
-            for row in rows:
-                if not row:
-                    continue
-                program_data = dict(row)
-                # Manually handle JSON deserialization for thread safety
-                for key, value in program_data.items():
-                    if key in [
-                        "public_metrics",
-                        "private_metrics",
-                        "metadata",
-                        "archive_inspiration_ids",
-                        "top_k_inspiration_ids",
-                        "embedding",
-                        "embedding_pca_2d",
-                        "embedding_pca_3d",
-                        "migration_history",
-                    ] and isinstance(value, str):
-                        try:
-                            program_data[key] = json.loads(value)
-                        except json.JSONDecodeError:
-                            program_data[key] = {} if key.endswith("_metrics") else []
-                programs.append(Program(**program_data))
-            return programs
-        finally:
-            if conn:
-                conn.close()
-
-    @db_retry()
-    def get_top_programs_thread_safe(
-        self,
-        n: int = 10,
-        correct_only: bool = True,
-    ) -> List[Program]:
-        """Thread-safe version of get_top_programs."""
-        conn = None
-        try:
-            conn = sqlite3.connect(
-                self.config.db_path, check_same_thread=False, timeout=60.0
-            )
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # Use combined_score for sorting
-            base_query = """
-                SELECT * FROM programs
-                WHERE combined_score IS NOT NULL
-            """
-            if correct_only:
-                base_query += " AND correct = 1"
-            base_query += f" ORDER BY combined_score {self.sort_order} LIMIT ?"
-
-            cursor.execute(base_query, (n,))
-            all_rows = cursor.fetchall()
-
-            if not all_rows:
-                return []
-
-            # Process results
-            programs = []
-            for row_data in all_rows:
-                program_data = dict(row_data)
-
-                # Manually handle JSON deserialization for thread safety
-                json_fields = [
-                    "public_metrics",
-                    "private_metrics",
-                    "metadata",
-                    "archive_inspiration_ids",
-                    "top_k_inspiration_ids",
-                    "embedding",
-                    "embedding_pca_2d",
-                    "embedding_pca_3d",
-                    "migration_history",
-                ]
-                for key, value in program_data.items():
-                    if key in json_fields and isinstance(value, str):
-                        try:
-                            program_data[key] = json.loads(value)
-                        except json.JSONDecodeError:
-                            is_dict_field = (
-                                key.endswith("_metrics") or key == "metadata"
-                            )
-                            program_data[key] = {} if is_dict_field else []
-
-                # Handle text_feedback
-                if (
-                    "text_feedback" not in program_data
-                    or program_data["text_feedback"] is None
-                ):
-                    program_data["text_feedback"] = ""
-
-                programs.append(Program.from_dict(program_data))
-
-            return programs
-
-        finally:
-            if conn:
-                conn.close()
-
-    def _get_programs_for_island(self, island_idx: int) -> List[Program]:
-        """
-        Get all programs for a specific island.
-        """

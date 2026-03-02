@@ -347,14 +347,21 @@ class JobScheduler:
                 f.write(f"Sandbox error: {e}\n")
             return 1
 
-    def _submit_slurm(self, results_dir: str, cmd: List[str]) -> JobHandle:
+    def _submit_slurm(self, exec_fname: str, results_dir: str) -> JobHandle:
         """Submit a SLURM job with microsandbox."""
         log_dir = Path(results_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
 
         job_name = f"msb-{uuid.uuid4().hex[:6]}"
 
-        # Build sandbox command for SLURM
+        # Build evaluation command
+        cmd = [
+            self.config.eval_program_path,
+            "--program_path",
+            exec_fname,
+            "--results_dir",
+            results_dir,
+        ]
         cmd_str = " ".join(cmd)
         if self.config.packages:
             pkg_list = " ".join(self.config.packages)

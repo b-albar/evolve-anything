@@ -47,9 +47,7 @@ DIFF_ITER_MSG = """# Current program
 
 Here is the current program we are trying to improve (you will need to propose a modification to it below):
 
-```{language}
-{code_content}
-```
+{code_display}
 
 Here are the performance metrics of the program:
 

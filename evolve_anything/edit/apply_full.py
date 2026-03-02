@@ -1,6 +1,14 @@
+import difflib
+import re
 from pathlib import Path
-from typing import Optional, Union
-from .apply_diff import write_git_diff, _mutable_ranges, EVOLVE_START, EVOLVE_END
+from typing import Dict, Optional, Union
+from .apply_diff import (
+    write_git_diff,
+    _mutable_ranges,
+    _get_main_file_key,
+    EVOLVE_START,
+    EVOLVE_END,
+)
 from evolve_anything.llm import extract_between
 from evolve_anything.utils.format_config import DEFAULT_FORMAT, LANGUAGE_EXTENSIONS
 import logging
@@ -296,3 +304,100 @@ def apply_full_patch(
         )
     else:
         return updated_content, num_applied, None, error_message, None, None
+
+
+# Matches FILE: <path> followed by a fenced code block
+MULTIFILE_FULL_PATTERN = re.compile(
+    r"(?:###?\s*)?FILE:\s*(\S+)\s*\n\s*```\w*\n(.*?)```",
+    re.DOTALL,
+)
+
+
+def apply_full_patch_multifile(
+    patch_str: str,
+    files: Dict[str, str],
+    patch_dir: Optional[Union[str, Path]] = None,
+    language: str = "python",
+    verbose: bool = True,
+) -> tuple[str, int, Optional[Path], Optional[str], Optional[str], Optional[Path]]:
+    """Apply full rewrite patches to multiple files.
+
+    Expects the LLM output to contain FILE: <path> headers followed by
+    fenced code blocks. Falls back to single-file apply_full_patch when
+    no FILE headers are found.
+
+    Returns the same 6-tuple as apply_full_patch for compatibility.
+    """
+    matches = MULTIFILE_FULL_PATTERN.findall(patch_str)
+
+    if not matches:
+        # No multi-file format — fall back to single-file
+        main_key = _get_main_file_key(files, language)
+        return apply_full_patch(
+            patch_str=patch_str,
+            original_str=files[main_key],
+            patch_dir=patch_dir,
+            language=language,
+            verbose=verbose,
+        )
+
+    # Build updated files dict
+    updated_files = dict(files)
+    for file_path, code in matches:
+        updated_files[file_path] = code.rstrip()
+
+    num_applied = len(matches)
+    output_path = None
+    diff_text = None
+    diff_path = None
+
+    if patch_dir is not None:
+        patch_dir = Path(patch_dir)
+        patch_dir.mkdir(parents=True, exist_ok=True)
+        (patch_dir / "rewrite.txt").write_text(patch_str, "utf-8")
+
+        # Write original backups
+        for fp, content in files.items():
+            backup_name = f"original_{fp.replace('/', '_')}"
+            (patch_dir / backup_name).write_text(content, "utf-8")
+
+        # Write updated files
+        for fp, content in updated_files.items():
+            out = patch_dir / fp
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(content, "utf-8")
+
+        # Combined diff
+        all_diffs = []
+        for fp in sorted(set(list(files.keys()) + list(updated_files.keys()))):
+            old = files.get(fp, "")
+            new = updated_files.get(fp, "")
+            if old != new:
+                diff_lines = difflib.unified_diff(
+                    old.splitlines(keepends=True),
+                    new.splitlines(keepends=True),
+                    fromfile=f"a/{fp}",
+                    tofile=f"b/{fp}",
+                    n=3,
+                )
+                all_diffs.extend(diff_lines)
+
+        diff_path = patch_dir / "edit.diff"
+        diff_text = "".join(all_diffs)
+        diff_path.write_text(diff_text, "utf-8")
+
+        main_key = _get_main_file_key(files, language)
+        output_path = patch_dir / main_key
+
+        if verbose:
+            logger.info(f"Multi-file rewrite written to: {patch_dir}")
+
+    main_key = _get_main_file_key(files, language)
+    return (
+        updated_files.get(main_key, ""),
+        num_applied,
+        output_path,
+        None,
+        diff_text,
+        diff_path,
+    )
