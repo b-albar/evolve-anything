@@ -431,6 +431,17 @@ class EvolutionRunner:
         )
 
         try:
+            # Reset if DB is empty despite metadata claiming progress
+            if self.completed_generations > 0 and self.db._count_programs_in_db() == 0:
+                logger.warning(
+                    "Database metadata indicates progress but no programs found. "
+                    "Resetting evolution from generation 0."
+                )
+                self.completed_generations = 0
+                self.next_generation_to_submit = 0
+                self.db.last_iteration = 0
+                self.db._update_metadata_in_db("last_iteration", "0")
+
             # First, run generation 0 sequentially to populate the database
             if self.completed_generations == 0 and target_gens > 0:
                 logger.info(

@@ -8,6 +8,7 @@ for LLM and embedding providers using OpenRouter's unified API.
 from .base import BaseLLMProvider, BaseEmbeddingProvider
 from .openrouter import OpenRouterProvider
 from .openrouter_embedding import OpenRouterEmbeddingProvider
+from .local_embedding import LocalEmbeddingProvider
 from .result import QueryResult
 
 # Reasoning models - models that support extended thinking/reasoning
@@ -53,6 +54,7 @@ __all__ = [
     # Concrete providers
     "OpenRouterProvider",
     "OpenRouterEmbeddingProvider",
+    "LocalEmbeddingProvider",
     # Data classes
     "QueryResult",
     # Model configurations

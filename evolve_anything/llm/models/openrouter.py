@@ -55,13 +55,13 @@ class OpenRouterProvider(BaseLLMProvider):
             base_url: Base URL for the API. Defaults to OpenRouter's API URL.
             **kwargs: Additional configuration options
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "OpenRouter API key not found. Set OPENAI_API_KEY environment "
+                "API key not found. Set OPENAI_API_KEY or LLM_API_KEY environment "
                 "variable or pass api_key parameter."
             )
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL")
         self._client = None
         self._async_client = None
 

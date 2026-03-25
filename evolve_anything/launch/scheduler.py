@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -30,7 +31,7 @@ class JobConfig:
 
     Attributes:
         eval_program_path: Path to the evaluation program.
-        extra_cmd_args: Additional command-line arguments.
+        eval_args: Additional command-line arguments for the evaluation program.
         image: Microsandbox image to use.
         packages: List of Python packages to install in the sandbox.
         cpus: Number of CPUs per job.
@@ -43,7 +44,7 @@ class JobConfig:
     """
 
     eval_program_path: str = "evaluate.py"
-    extra_cmd_args: Dict[str, Any] = field(default_factory=dict)
+    eval_args: List[str] = field(default_factory=list)
     image: str = "microsandbox/python"
     packages: List[str] = field(default_factory=list)
     cpus: int = 1
@@ -188,11 +189,13 @@ class JobScheduler:
             # Direct execution
             with open(stdout_path, "w") as stdout_f, open(stderr_path, "w") as stderr_f:
                 cmd = [
-                    "./" + self.config.eval_program_path,
+                    sys.executable,
+                    self.config.eval_program_path,
                     "--program_path",
                     exec_fname,
                     "--results_dir",
                     results_dir,
+                    *self.config.eval_args,
                 ]
                 process = subprocess.Popen(
                     cmd,
@@ -322,6 +325,7 @@ class JobScheduler:
                         "program.py",
                         "--results_dir",
                         "results",
+                        *self.config.eval_args,
                     ]
                 )
 
@@ -361,6 +365,7 @@ class JobScheduler:
             exec_fname,
             "--results_dir",
             results_dir,
+            *self.config.eval_args,
         ]
         cmd_str = " ".join(cmd)
         if self.config.packages:

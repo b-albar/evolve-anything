@@ -4,22 +4,33 @@ Embedding module.
 Provides embedding functionality using OpenRouter's unified API.
 """
 
+import os
 import pandas as pd
 from typing import Union, List, Tuple
 import numpy as np
 import logging
 
-from .models import OpenRouterEmbeddingProvider
+from .models import OpenRouterEmbeddingProvider, LocalEmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+LOCAL_PREFIX = "local:"
+OPENAI_PREFIX = "openai:"
+CLIPROXYSDK_PREFIX = "cliproxysdk:"
 
 
 class EmbeddingClient:
     """
-    Embedding client using OpenAI-compatible API.
+    Embedding client supporting both API and local models.
 
     This client provides a simplified interface for generating embeddings
     across multiple providers.
+
+    Prefixes:
+        - "local:" — sentence-transformers (e.g., "local:nomic-ai/CodeRankEmbed")
+        - "openai:" — OpenAI API using OPENAI_API_KEY / OPENAI_BASE_URL env vars
+        - "cliproxysdk:" — CLIProxyAPI using LLM_API_KEY / LLM_BASE_URL env vars
+        - no prefix — auto-detects from env vars (LLM_BASE_URL > OPENAI_BASE_URL)
     """
 
     def __init__(
@@ -31,15 +42,40 @@ class EmbeddingClient:
         Initialize the EmbeddingClient.
 
         Args:
-            model_name: The embedding model to use (e.g., "openai/text-embedding-3-small")
+            model_name: The embedding model to use. Prefix with "local:" for
+                sentence-transformers, "openai:" for OpenAI API, or "cliproxysdk:"
+                for CLIProxyAPI.
             verbose: Whether to enable verbose logging
         """
         self.model_name = model_name
         self.verbose = verbose
-        self._provider = OpenRouterEmbeddingProvider(
-            model_name=self.model_name,
-            verbose=verbose,
-        )
+        if model_name.startswith(LOCAL_PREFIX):
+            hf_model = model_name[len(LOCAL_PREFIX):]
+            self._provider = LocalEmbeddingProvider(
+                model_name=hf_model,
+                verbose=verbose,
+            )
+        elif model_name.startswith(OPENAI_PREFIX):
+            oai_model = model_name[len(OPENAI_PREFIX):]
+            self._provider = OpenRouterEmbeddingProvider(
+                model_name=oai_model,
+                api_key=os.getenv("OPENAI_API_KEY"),
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                verbose=verbose,
+            )
+        elif model_name.startswith(CLIPROXYSDK_PREFIX):
+            proxy_model = model_name[len(CLIPROXYSDK_PREFIX):]
+            self._provider = OpenRouterEmbeddingProvider(
+                model_name=proxy_model,
+                api_key=os.getenv("LLM_API_KEY"),
+                base_url=os.getenv("LLM_BASE_URL"),
+                verbose=verbose,
+            )
+        else:
+            self._provider = OpenRouterEmbeddingProvider(
+                model_name=self.model_name,
+                verbose=verbose,
+            )
 
     def get_embedding(
         self, code: Union[str, List[str]]

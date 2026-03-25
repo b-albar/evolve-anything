@@ -47,6 +47,9 @@ dependencies = [
     "beautifulsoup4",
 ]
 
+[project.optional-dependencies]
+local-embed = ["sentence-transformers"]
+
 [project.scripts]
 evolve-anything-visualize = "evolve_anything.webui.visualization:main"
 evolve-anything-streamlit = "evolve_anything.webui.streamlit_app:cli_main"

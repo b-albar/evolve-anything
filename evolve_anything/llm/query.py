@@ -2,8 +2,8 @@
 Query module.
 
 Provides functions for querying LLMs and sampling model kwargs.
-Uses the OpenRouter provider for all model queries, with optional
-support for Claude Code wrapper via model prefix routing.
+Uses the OpenRouter provider by default, with prefix-based routing
+for alternative backends (e.g., 'cliproxysdk:' for CLIProxyAPI).
 """
 
 import os
@@ -22,11 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Global provider instances (lazy initialized)
 _default_provider: OpenRouterProvider = None
-_claude_code_provider: OpenRouterProvider = None
+_cliproxysdk_provider: OpenRouterProvider = None
 
-# Claude Code wrapper configuration
-CLAUDE_CODE_PREFIX = "claude-code/"
-CLAUDE_CODE_BASE_URL = os.getenv("CLAUDE_CODE_BASE_URL", "http://localhost:7999/v1")
+# Prefix-based routing configuration
+CLIPROXYSDK_PREFIX = "cliproxysdk:"
 
 
 def _get_provider(model_name: Optional[str] = None) -> OpenRouterProvider:
@@ -34,38 +33,47 @@ def _get_provider(model_name: Optional[str] = None) -> OpenRouterProvider:
 
     Args:
         model_name: The model name to determine which provider to use.
-                   Models prefixed with 'claude-code/' use the Claude Code wrapper.
+            Supported prefixes:
+            - 'cliproxysdk:' — CLIProxyAPI (LLM_BASE_URL / LLM_API_KEY)
+            - no prefix — default (OPENAI_API_KEY / LLM_API_KEY env vars)
 
     Returns:
         The appropriate OpenRouterProvider instance.
     """
-    global _default_provider, _claude_code_provider
+    global _default_provider, _cliproxysdk_provider
 
-    # Check if this is a Claude Code model
-    if model_name and model_name.startswith(CLAUDE_CODE_PREFIX):
-        if _claude_code_provider is None:
-            # Use a dummy API key for Claude Code wrapper (it uses CLI auth)
-            api_key = os.getenv("CLAUDE_CODE_API_KEY", "claude-code")
-            _claude_code_provider = OpenRouterProvider(
+    # Check if this is a CLIProxySDK model
+    if model_name and model_name.startswith(CLIPROXYSDK_PREFIX):
+        if _cliproxysdk_provider is None:
+            api_key = os.getenv("LLM_API_KEY")
+            base_url = os.getenv("LLM_BASE_URL")
+            if not api_key:
+                raise ValueError(
+                    "LLM_API_KEY env var required for cliproxysdk: models"
+                )
+            if not base_url:
+                raise ValueError(
+                    "LLM_BASE_URL env var required for cliproxysdk: models"
+                )
+            _cliproxysdk_provider = OpenRouterProvider(
                 api_key=api_key,
-                base_url=CLAUDE_CODE_BASE_URL,
+                base_url=base_url,
             )
-        return _claude_code_provider
+        return _cliproxysdk_provider
 
-    # Default provider for OpenRouter
+    # Default provider
     if _default_provider is None:
         _default_provider = OpenRouterProvider()
     return _default_provider
 
 
 def _normalize_model_name(model_name: str) -> str:
-    """Strip the claude-code/ prefix for the actual API call.
+    """Strip provider prefix for the actual API call.
 
-    The Claude Code wrapper accepts any model name, so we strip the prefix
-    and pass the rest (e.g., 'claude-code/opus' -> 'opus').
+    Example: 'cliproxysdk:claude-sonnet-4-6' -> 'claude-sonnet-4-6'
     """
-    if model_name.startswith(CLAUDE_CODE_PREFIX):
-        return model_name[len(CLAUDE_CODE_PREFIX):]
+    if model_name.startswith(CLIPROXYSDK_PREFIX):
+        return model_name[len(CLIPROXYSDK_PREFIX):]
     return model_name
 
 
@@ -148,8 +156,8 @@ def query(
 
     Args:
         model_name: The model to query. Supports:
-            - OpenRouter models: "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
-            - Claude Code wrapper: "claude-code/opus", "claude-code/sonnet"
+            - Default (OpenRouter/env): "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
+            - CLIProxyAPI: "cliproxysdk:claude-sonnet-4-6"
         msg: The user message
         system_msg: The system prompt
         msg_history: Previous conversation history
@@ -195,8 +203,8 @@ async def query_async(
 
     Args:
         model_name: The model to query. Supports:
-            - OpenRouter models: "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
-            - Claude Code wrapper: "claude-code/opus", "claude-code/sonnet"
+            - Default (OpenRouter/env): "openai/gpt-4o", "anthropic/claude-3-5-sonnet"
+            - CLIProxyAPI: "cliproxysdk:claude-sonnet-4-6"
         msg: The user message
         system_msg: The system prompt
         msg_history: Previous conversation history
